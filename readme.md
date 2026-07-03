@@ -171,7 +171,7 @@ See [the demo](https://github.com/yomotsu/camera-movement-comparison#dolly-vs-zo
 | `.maxAzimuthAngle`        | `number`  | `Infinity`  | In radians. |
 | `.boundaryFriction`       | `number`  | `0.0`       | Friction ratio of the boundary. |
 | `.boundaryEnclosesCamera` | `boolean` | `false`     | Whether camera position should be enclosed in the boundary or not. |
-| `.smoothTime`             | `number \| object` | `0.25`  | Approximate time in seconds to reach the target. A smaller value will reach the target faster. A number applies to all operations, or pass an object keyed by `rotate` / `truck` / `dolly` / `zoom` / `offset`. |
+| `.smoothTime`             | `number \| object` | `0.25`  | Approximate time in seconds to reach the target. A smaller value will reach the target faster. A number applies to all operations, or pass an object keyed by `rotateAzimuth` / `rotatePolar` / `truck` / `dolly` / `zoom` / `offset`. `rotate` is a write-only shorthand that sets both rotate axes. |
 | `.controlSmoothTime`      | `number \| object` | `0.125` | The smoothTime used while the user is actively controlling the camera. Same number-or-object form as `.smoothTime`. |
 | `.azimuthRotateSpeed`     | `number`  | `1.0`       | Speed of azimuth rotation. |
 | `.polarRotateSpeed`       | `number`  | `1.0`       | Speed of polar rotation. |
@@ -827,14 +827,16 @@ The angle range for `normalizeRotations()` has been changed from 0deg to 360deg 
 
 ### Granular smooth time
 
-`.smoothTime` and `.controlSmoothTime` now accept either a `number` (applied to every operation) or an object keyed by operation — `rotate`, `truck`, `dolly`, `zoom`, `offset`:
+`.smoothTime` and `.controlSmoothTime` now accept either a `number` (applied to every operation) or an object keyed by operation — `rotateAzimuth`, `rotatePolar`, `truck`, `dolly`, `zoom`, `offset`:
 
 ```js
-cameraControls.smoothTime = 0.25;           // all operations
-cameraControls.smoothTime = { dolly: 0.1 }; // only dolly; the other operations keep their current values
+cameraControls.smoothTime = 0.25;                  // all operations
+cameraControls.smoothTime = { dolly: 0.1 };        // only dolly; other operations keep their current values
+cameraControls.smoothTime = { rotate: 0.1 };       // shorthand: sets both rotate axes
+cameraControls.smoothTime = { rotatePolar: 0.2 };  // only the polar (vertical) rotate axis
 ```
 
-- **Breaking:** reading `.smoothTime` / `.controlSmoothTime` now returns an object (`{ rotate, truck, dolly, zoom, offset }`) instead of a `number`.
+- **Breaking:** reading `.smoothTime` / `.controlSmoothTime` now returns an object (`{ rotateAzimuth, rotatePolar, truck, dolly, zoom, offset }`) instead of a `number`. `rotate` is write-only: it is accepted when setting but never appears on reads.
 - `.draggingSmoothTime` is renamed to `.controlSmoothTime`. The old name still works as a deprecated alias.
 - The published type declarations are no longer downleveled (TypeScript >= 4.3 is now required to consume the types).
 

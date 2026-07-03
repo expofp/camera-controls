@@ -37,7 +37,7 @@ import { EventDispatcher, Listener } from './EventDispatcher';
 
 const VERSION = '__VERSION'; // will be replaced with `version` in package.json during the build process.
 const TOUCH_DOLLY_FACTOR = 1 / 8;
-const SMOOTH_TIME_KEYS: ( keyof SmoothTimes )[] = [ 'rotate', 'truck', 'dolly', 'zoom', 'offset' ];
+const SMOOTH_TIME_KEYS: ( keyof SmoothTimes )[] = [ 'rotateAzimuth', 'rotatePolar', 'truck', 'dolly', 'zoom', 'offset' ];
 const isMac = /Mac/.test( globalThis?.navigator?.platform );
 
 let THREE: THREESubset;
@@ -2600,7 +2600,7 @@ export class CameraControls extends EventDispatcher {
 
 		} else {
 
-			const smoothTime = this._isUserControllingRotate ? this._controlSmoothTime.rotate : this._smoothTime.rotate;
+			const smoothTime = this._isUserControllingRotate ? this._controlSmoothTime.rotateAzimuth : this._smoothTime.rotateAzimuth;
 			this._spherical.theta = smoothDamp( this._spherical.theta, this._sphericalEnd.theta, this._thetaVelocity, smoothTime, Infinity, delta );
 			this._needsUpdate = true;
 
@@ -2614,7 +2614,7 @@ export class CameraControls extends EventDispatcher {
 
 		} else {
 
-			const smoothTime = this._isUserControllingRotate ? this._controlSmoothTime.rotate : this._smoothTime.rotate;
+			const smoothTime = this._isUserControllingRotate ? this._controlSmoothTime.rotatePolar : this._smoothTime.rotatePolar;
 			this._spherical.phi = smoothDamp( this._spherical.phi, this._sphericalEnd.phi, this._phiVelocity, smoothTime, Infinity, delta );
 			this._needsUpdate = true;
 
@@ -3315,7 +3315,9 @@ export class CameraControls extends EventDispatcher {
 	/**
 	 * Approximate time in seconds to reach the target. A smaller value will reach the target faster.
 	 * Accepts a number (applied to every operation) or an object keyed by operation
-	 * (`rotate`, `truck`, `dolly`, `zoom`, `offset`); an object merges the given keys.
+	 * (`rotateAzimuth`, `rotatePolar`, `truck`, `dolly`, `zoom`, `offset`); an object merges the
+	 * given keys. `rotate` is accepted as a write-only shorthand that sets both rotate axes, but
+	 * reads always expose `rotateAzimuth`/`rotatePolar` (never `rotate`).
 	 * @category Properties
 	 */
 	get smoothTime(): SmoothTimes {
@@ -3369,9 +3371,13 @@ export class CameraControls extends EventDispatcher {
 
 		if ( typeof value === 'number' ) {
 
-			target.rotate = target.truck = target.dolly = target.zoom = target.offset = value;
+			target.rotateAzimuth = target.rotatePolar = target.truck = target.dolly = target.zoom = target.offset = value;
 
 		} else {
+
+			// `rotate` is a write-only shorthand: seed both axes first, then let an explicit
+			// `rotateAzimuth`/`rotatePolar` in the same object override it (specific wins).
+			if ( value.rotate !== undefined ) target.rotateAzimuth = target.rotatePolar = value.rotate;
 
 			for ( const key of SMOOTH_TIME_KEYS ) {
 
