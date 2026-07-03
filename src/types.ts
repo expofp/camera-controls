@@ -19,14 +19,18 @@ export type Ref = {
 }
 
 export interface SmoothTimes {
-	rotate: number;
+	rotateAzimuth: number;
+	rotatePolar: number;
 	truck: number;
 	dolly: number;
 	zoom: number;
 	offset: number;
 }
 
-export type SmoothTimeOption = number | Partial<SmoothTimes>;
+// `rotate` is a write-only shorthand accepted by the setters: it fans out to both
+// `rotateAzimuth` and `rotatePolar`. It is intentionally absent from the readable
+// `SmoothTimes` shape (reads always expose the two axes, never a `rotate` value).
+export type SmoothTimeOption = number | ( Partial<SmoothTimes> & { rotate?: number } );
 
 // see https://developer.mozilla.org/en-US/docs/Web/API/MouseEvent/buttons#value
 export const MOUSE_BUTTON = {
