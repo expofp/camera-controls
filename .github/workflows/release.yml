@@ -1,117 +1,76 @@
-name: Build and Release to npm
+name: ExpoFP Release
+
+# Tag-only dist release for the ExpoFP fork.
+# On every push to `expofp`: build, then publish an immutable tag whose commit
+# contains the built `dist/`. The `expofp` branch itself stays source-only —
+# the release commit is pushed ONLY as a tag ref, never back to the branch.
+# Consumers install a specific tag:  github:expofp/camera-controls#v3.1.3-expofp.1
+
 on:
   push:
-    branches:
-      - 'main'
+    branches: [expofp]
 
-# Cancel any previous run (see: https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#concurrency)
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: expofp-release
+  cancel-in-progress: false      # queue releases, never drop one
+
+permissions:
+  contents: write                # push tags + create GitHub Release
 
 jobs:
-
-  release-job:
+  release:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version-file: ".nvmrc"
-          cache: "npm"
+          node-version-file: .nvmrc
+          cache: npm
 
-      - name: Install Dependencies and Release
-        id: main
+      - name: Install
+        run: npm ci
+
+      - name: Lint & build (RELEASE GATE — a broken merge produces no tag)
         run: |
-          npm ci
-          npm run release
+          npm run lint
+          npm run build
 
-          # Check if release was successful (dist directory exists)
-          if [ ! -d "dist/" ]; then
-              echo "Release did not create dist directory, running build..."
-              npm run build
-          fi
+      - name: Compute next tag
+        id: tag
+        run: |
+          # Base = nearest upstream release tag actually reachable from HEAD.
+          # `--exclude '*-expofp*'` keeps our own release tags from matching the glob.
+          git remote add upstream https://github.com/yomotsu/camera-controls.git 2>/dev/null || true
+          git fetch upstream --tags -q
+          git fetch --tags --force
+          BASE=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-expofp*' HEAD | sed 's/^v//') \
+            || { echo "::error::no upstream base tag reachable from expofp"; exit 1; }
+          N=$(git tag -l "v${BASE}-expofp.*" | sed "s/.*-expofp\.//" | sort -n | tail -1)
+          N=${N:-0}
+          TAG="v${BASE}-expofp.$((N + 1))"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Next release tag: $TAG"
+
+      - name: Assemble dist-bearing release commit (lean consumer install)
+        run: |
+          git config user.name  "expofp-ci"
+          git config user.email "ci@expofp.com"
+          # Drop `prepare` so a git-dependency install neither rebuilds nor pulls devDeps —
+          # it just consumes the committed dist/. This edit lives only on the tag.
+          npm pkg delete scripts.prepare
+          git add -f dist package.json
+          git commit -m "chore(release): ${{ steps.tag.outputs.tag }} [skip ci]"
+
+      - name: Tag & push (TAG ONLY — expofp stays source-only)
+        run: |
+          git tag -a "${{ steps.tag.outputs.tag }}" -m "ExpoFP release ${{ steps.tag.outputs.tag }}"
+          git push origin "${{ steps.tag.outputs.tag }}"
+
+      - name: GitHub Release
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate documentation
-        run: npm run typedoc
-
-      - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Upload docs artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: typedoc-docs
-          path: docs/
-
-  deploy-job:
-    needs: release-job
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download dist artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Download typedoc docs artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: typedoc-docs
-          path: docs/
-
-      - name: Prepare examples directory
-        run: |
-          # Remove the alias to dist (if it exists)
-          find examples -name "* alias" -delete
-          find examples -name "dist" -type l -delete
-          rm -rf examples/dist
-
-          # Copy the actual dist content to examples/dist
-          cp -r dist examples/dist
-
-      - name: Prepare docs directory
-        run: |
-          # Copy examples to docs directory
-          cp -r examples docs/
-
-          # Delete any remaining symbolic links and macOS aliases under the docs directory
-          find docs -type l -delete
-          find docs -name "* alias" -delete
-          find docs -type l -delete
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload to GitHub Pages
-        uses: actions/upload-pages-artifact@v3
-        with:
-          name: github-pages
-          path: ./docs
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ steps.tag.outputs.tag }}" --generate-notes --title "${{ steps.tag.outputs.tag }}"
