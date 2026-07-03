@@ -73,4 +73,6 @@ jobs:
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${{ steps.tag.outputs.tag }}" --generate-notes --title "${{ steps.tag.outputs.tag }}"
+        # --repo pins gh to the fork; without it gh resolves the default repo from git
+        # remotes and picks `upstream` (yomotsu), which was added in the compute-tag step.
+        run: gh release create "${{ steps.tag.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --generate-notes --title "${{ steps.tag.outputs.tag }}"
