@@ -1,13 +1,25 @@
 import type * as _THREE from 'three';
 import { CameraControls, getInstalledTHREE } from './CameraControls';
 import { DEG2RAD } from './utils/math-utils';
+import { ACTION, type MouseButtons } from './types';
+
+type NoTruckMouseAction = Exclude<MouseButtons[ 'left' ], typeof ACTION.TRUCK>;
+export interface MapMouseButtons extends MouseButtons {
+	left: NoTruckMouseAction;
+	middle: NoTruckMouseAction;
+	right: NoTruckMouseAction;
+	wheel: NoTruckMouseAction;
+}
 
 export class MapControls extends CameraControls {
 
 	dollyToCursorGrazeAngle = { min: 15 * DEG2RAD, max: 35 * DEG2RAD };
 
+	declare mouseButtons: MapMouseButtons;
+
 	protected _targetPlaneNormal: _THREE.Vector3;
 	protected _targetPlaneConstant = 0;
+	protected _warnedTruck = false;
 
 	// Scratch vectors for the cursor-anchored dolly/zoom math (Tasks 6-7), reused every
 	// frame to avoid per-frame allocation. Constructed in the constructor, after install
@@ -53,6 +65,27 @@ export class MapControls extends CameraControls {
 		// default plane: horizontal, through the initial target
 		this._updateTargetPlaneNormal();
 		this._targetPlaneConstant = this._targetEnd.dot( this._targetPlaneNormal );
+
+		const baseTruckInternal = this._truckInternal;
+		this._truckInternal = ( deltaX: number, deltaY: number, dragToOffset: boolean, screenSpacePanning: boolean ): void => {
+
+			// OFFSET (focal-offset) is not a pan — leave it untouched.
+			if ( ! dragToOffset && ! screenSpacePanning ) {
+
+				if ( ! this._warnedTruck ) {
+
+					console.warn( 'MapControls: TRUCK panning drifts the target off the plane; coercing to SCREEN_PAN. Bind SCREEN_PAN instead of TRUCK.' );
+					this._warnedTruck = true;
+
+				}
+
+				screenSpacePanning = true;
+
+			}
+
+			baseTruckInternal( deltaX, deltaY, dragToOffset, screenSpacePanning );
+
+		};
 
 	}
 
