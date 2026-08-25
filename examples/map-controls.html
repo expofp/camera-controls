@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>map-controls</title>
+<link rel="stylesheet" href="./style.css">
+<style>
+#readout { position: fixed; left: 8px; bottom: 8px; font: 12px monospace; background: rgba(0,0,0,.6); color: #0f0; padding: 6px 8px; white-space: pre; }
+#panel { position: fixed; right: 8px; top: 8px; font: 12px sans-serif; background: rgba(0,0,0,.6); color: #fff; padding: 8px; }
+</style>
+</head>
+<body>
+<div id="panel">
+	<label>tilt <input id="tilt" type="range" min="0" max="85" value="45"> <span id="tiltval">45</span>°</label><br>
+	<label><input id="ortho" type="checkbox"> orthographic</label>
+</div>
+<div id="readout"></div>
+
+<script async src="https://unpkg.com/es-module-shims@2.6.1/dist/es-module-shims.js"></script>
+<script type="importmap">
+{ "imports": {
+	"three": "https://unpkg.com/three@0.178.0/build/three.module.js",
+	"three/addons/": "https://unpkg.com/three@0.178.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import CameraControls, { MapControls } from './dist/camera-controls.module.js';
+CameraControls.install( { THREE } );
+
+const width = window.innerWidth, height = window.innerHeight;
+const clock = new THREE.Clock();
+const scene = new THREE.Scene();
+const renderer = new THREE.WebGLRenderer();
+renderer.setSize( width, height );
+document.body.appendChild( renderer.domElement );
+
+const persp = new THREE.PerspectiveCamera( 60, width / height, 0.01, 1000 );
+const frustum = 20;
+const ortho = new THREE.OrthographicCamera( - frustum * width / height / 2, frustum * width / height / 2, frustum / 2, - frustum / 2, 0.01, 1000 );
+
+const grid = new THREE.GridHelper( 100, 100 );
+scene.add( grid );
+scene.add( new THREE.AxesHelper( 2 ) );
+
+// grab DOM elements before constructing controls, since makeControls() reads `tilt` immediately
+const tilt = document.getElementById( 'tilt' );
+const tiltval = document.getElementById( 'tiltval' );
+const readout = document.getElementById( 'readout' );
+
+function makeControls( cam ) {
+
+	const c = new MapControls( cam, renderer.domElement );
+	// map-style remap: left = screen pan, right = rotate, wheel = dolly/zoom to cursor
+	c.mouseButtons.left  = CameraControls.ACTION.SCREEN_PAN;
+	c.mouseButtons.right = CameraControls.ACTION.ROTATE;
+	c.dollyToCursor = true;
+	c.maxPolarAngle = 85 * THREE.MathUtils.DEG2RAD; // stay above ground
+	c.setLookAt( 0, 12, 12, 0, 0, 0, false );
+	applyTilt( c, Number( tilt.value ) );
+	return c;
+
+}
+
+function applyTilt( c, deg ) { c.rotatePolarTo( ( 90 - deg ) * THREE.MathUtils.DEG2RAD, false ); }
+
+let camera = persp;
+let controls = makeControls( persp );
+
+tilt.addEventListener( 'input', () => { tiltval.textContent = tilt.value; applyTilt( controls, Number( tilt.value ) ); } );
+document.getElementById( 'ortho' ).addEventListener( 'change', ( e ) => {
+	controls.dispose();
+	camera = e.target.checked ? ortho : persp;
+	controls = makeControls( camera );
+} );
+
+( function anim () {
+
+	const delta = clock.getDelta();
+	const updated = controls.update( delta );
+	requestAnimationFrame( anim );
+	const t = controls.getTarget( new THREE.Vector3() );
+	const off = t.dot( new THREE.Vector3().copy( camera.up ).normalize() ) - controls.getTargetPlaneConstant();
+	readout.textContent =
+		`target  x=${t.x.toFixed(3)} y=${t.y.toFixed(3)} z=${t.z.toFixed(3)}\n` +
+		`plane offset ${off.toFixed(4)}  ${Math.abs( off ) < 1e-3 ? 'ON-PLANE ✓' : 'DRIFT ✗'}`;
+	if ( updated ) renderer.render( scene, camera );
+
+} )();
+
+// make variable available to browser console
+globalThis.controls = controls;
+</script>
+</body>
+</html>
