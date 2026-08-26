@@ -16,6 +16,10 @@ export class MapControls extends CameraControls {
 
 	dollyToCursorGrazeAngle = { min: 15 * DEG2RAD, max: 35 * DEG2RAD };
 
+	// This narrowed type steers TS callers away from assigning `ACTION.TRUCK`, but it's
+	// only a compile-time nudge: the base constructor still sets `right = ACTION.TRUCK`
+	// at runtime by default. The actual in-plane guarantee comes from the runtime
+	// `_truckInternal` coercion, which forces screen-space panning regardless of type.
 	declare mouseButtons: MapMouseButtons;
 
 	protected _targetPlaneNormal: _THREE.Vector3;
@@ -240,7 +244,10 @@ export class MapControls extends CameraControls {
 
 	}
 
-	getTargetPlaneConstant(): number {
+	/**
+	 * The signed height of the target plane along the up axis.
+	 */
+	getTargetPlane(): number {
 
 		return this._targetPlaneConstant;
 

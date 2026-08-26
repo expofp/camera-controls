@@ -81,7 +81,7 @@ document.getElementById( 'ortho' ).addEventListener( 'change', ( e ) => {
 	const updated = controls.update( delta );
 	requestAnimationFrame( anim );
 	const t = controls.getTarget( new THREE.Vector3() );
-	const off = t.dot( new THREE.Vector3().copy( camera.up ).normalize() ) - controls.getTargetPlaneConstant();
+	const off = t.dot( new THREE.Vector3().copy( camera.up ).normalize() ) - controls.getTargetPlane();
 	readout.textContent =
 		`target  x=${t.x.toFixed(3)} y=${t.y.toFixed(3)} z=${t.z.toFixed(3)}\n` +
 		`plane offset ${off.toFixed(4)}  ${Math.abs( off ) < 1e-3 ? 'ON-PLANE ✓' : 'DRIFT ✗'}`;
