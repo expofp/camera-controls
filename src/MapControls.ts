@@ -168,7 +168,63 @@ export class MapControls extends CameraControls {
 
 		} else if ( isOrthographicCamera( camera ) && this._changedZoom !== 0 ) {
 
-			super._computeDollyToCursorTarget(); // ortho handled in Task 7
+			this._updateTargetPlaneNormal();
+			const n = this._normal.copy( this._targetPlaneNormal );
+			const planeConstant = this._targetPlaneConstant;
+
+			const dollyControlAmount = this._zoom - this._lastZoom;
+			const zoom = this._zoom;
+			const prevZoom = zoom - dollyControlAmount;
+			const lerpRatio = - ( prevZoom - zoom ) / zoom;
+
+			// orthographic: every pixel's ray runs along the camera's forward axis
+			const origin = this._origin.set(
+				this._dollyControlCoord.x,
+				this._dollyControlCoord.y,
+				( camera.near + camera.far ) / ( camera.near - camera.far ),
+			).unproject( camera );
+			const dir = this._dir.set( 0, 0, - 1 ).applyQuaternion( camera.quaternion ).normalize();
+
+			const dirDotN = dir.dot( n );
+			let w = grazeWeight( dirDotN, this.dollyToCursorGrazeAngle.min, this.dollyToCursorGrazeAngle.max );
+
+			// anchored delta: slide the target toward the on-plane point under the cursor.
+			// Ortho `t` need not be > 0: the origin is a mid-frustum unproject, so the
+			// plane can lie behind it along `dir`; accept any finite t from a valid hit.
+			const anchored = this._anchored.set( 0, 0, 0 );
+			const t = intersectRayPlane(
+				origin.x, origin.y, origin.z,
+				dir.x, dir.y, dir.z,
+				n.x, n.y, n.z, planeConstant,
+			);
+			if ( w > 0 && t !== null ) {
+
+				const hit = this._hit.copy( origin ).addScaledVector( dir, t );
+				anchored.subVectors( hit, this._targetEnd ).multiplyScalar( lerpRatio );
+
+			} else {
+
+				w = 0; // parallel ray → pure pan fallback
+
+			}
+
+			// pan fallback: in-plane forward direction, scaled by the zoom step
+			const horiz = this._horiz.copy( dir ).addScaledVector( n, - dirDotN );
+			if ( horiz.lengthSq() > 0 ) horiz.normalize();
+			const pan = this._pan.copy( horiz ).multiplyScalar( dollyControlAmount );
+
+			// blend pan → anchored by grazing weight, apply, re-project onto plane
+			const delta = this._delta.copy( pan ).lerp( anchored, w );
+			const newTargetEnd = this._newTarget.copy( this._targetEnd ).add( delta );
+			newTargetEnd.addScaledVector( n, planeConstant - newTargetEnd.dot( n ) );
+			this._boundary.clampPoint( newTargetEnd, newTargetEnd );
+
+			const diff = this._diff.subVectors( newTargetEnd, this._targetEnd );
+			this._targetEnd.copy( newTargetEnd );
+			this._target.add( diff );
+
+			this._changedZoom -= dollyControlAmount;
+			if ( approxZero( this._changedZoom ) ) this._changedZoom = 0;
 
 		}
 
