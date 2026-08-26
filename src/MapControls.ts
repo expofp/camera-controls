@@ -1,6 +1,6 @@
 import type * as _THREE from 'three';
 import { CameraControls, getInstalledTHREE } from './CameraControls';
-import { clamp, approxZero, DEG2RAD } from './utils/math-utils';
+import { clamp, DEG2RAD } from './utils/math-utils';
 import { intersectRayPlane } from './utils/plane-utils';
 import { ACTION, DOLLY_DIRECTION, isPerspectiveCamera, isOrthographicCamera, type MouseButtons } from './types';
 
@@ -18,13 +18,15 @@ const GRAZE_EPSILON = 1e-7;
 export class MapControls extends CameraControls {
 
 	/**
-	 * How far (as a fraction of the screen, toward the center) the cursor anchor
-	 * is pulled back from the horizon when dollying-to-cursor near a grazing angle.
-	 * Larger = trucking starts at a steeper angle and glides gentler; smaller =
-	 * anchoring stays exact closer to the horizon and glides faster. Mapbox's
-	 * `_horizonShift`.
+	 * Caps the cursor-anchor distance for dolly/zoom-to-cursor, as a multiple of the
+	 * orbit radius (perspective) or the visible frustum height (orthographic). Below the
+	 * horizon the true anchor is usually nearer than the cap, so anchoring stays EXACT and
+	 * this has no effect. Near/above the horizon the anchor distance explodes (the ray runs
+	 * near-parallel to the plane), so the cap bounds it: one wheel notch then glides at most
+	 * ~`radius · dollyToCursorMaxGlide · (1 − dollyScale)` along the cursor's ground bearing,
+	 * scaling with the zoom level. Larger = longer/faster sky glide; smaller = shorter.
 	 */
-	dollyToCursorHorizonShift = 0.1;
+	dollyToCursorMaxGlide = 3;
 
 	// This narrowed type steers TS callers away from assigning `ACTION.TRUCK`, but it's
 	// only a compile-time nudge: the base constructor still sets `right = ACTION.TRUCK`
@@ -55,7 +57,7 @@ export class MapControls extends CameraControls {
 	protected _movedCamera: _THREE.Vector3;
 	/** World-space origin of the cursor ray at mid-frustum (orthographic). */
 	protected _rayOrigin: _THREE.Vector3;
-	/** World anchor point `A` under the cursor (orthographic). */
+	/** In-plane offset from `_targetEnd` to the (glide-capped) cursor anchor (orthographic). */
 	protected _anchor: _THREE.Vector3;
 	/** Recomputed END-state target `T'`. */
 	protected _newTarget: _THREE.Vector3;
@@ -150,42 +152,33 @@ export class MapControls extends CameraControls {
 					const tanY = Math.tan( camera.getEffectiveFOV() * DEG2RAD * 0.5 );
 					const tanX = tanY * camera.aspect;
 
-					// Horizon clamp: bound the grazing / sky case, keep horizontal bearing.
-					let ndcY = y;
-					const upDotN = up.dot( n );
-					if ( ! approxZero( upDotN ) ) {
-
-						const yHorizon = - forwardDotN / ( tanY * upDotN );
-						if ( yHorizon > 0 ) ndcY = Math.min( ndcY, yHorizon * ( 1 - this.dollyToCursorHorizonShift ) );
-
-					}
-
-					// Cursor ray direction `u` from the (possibly clamped) NDC.
+					// Cursor ray direction `u` from the NDC.
 					const u = this._cursorDir.copy( f )
 						.addScaledVector( right, x * tanX )
-						.addScaledVector( up, ndcY * tanY )
+						.addScaledVector( up, y * tanY )
 						.normalize();
 
-					// Force the ray to point into the plane if it still grazes / rises.
-					let uDotN = u.dot( n );
-					if ( uDotN > - GRAZE_EPSILON ) {
-
-						u.addScaledVector( n, - GRAZE_EPSILON - uDotN ).normalize();
-						uDotN = u.dot( n );
-
-					}
+					// Hard direction floor: a sky / grazing ray ( u·n ≥ 0 ) can never hit the
+					// plane, so redirect it just below horizontal along its ground bearing.
+					const uDotN = u.dot( n );
+					if ( uDotN > - GRAZE_EPSILON ) u.addScaledVector( n, - GRAZE_EPSILON - uDotN ).normalize();
 
 					// Anchor distance along `u` (t > 0, in front of the camera).
-					const t = intersectRayPlane(
+					let t = intersectRayPlane(
 						C.x, C.y, C.z,
 						u.x, u.y, u.z,
 						n.x, n.y, n.z, planeConstant,
 					);
 
+					// Glide cap: near/above the horizon `t` explodes, so bound it. Below the
+					// horizon the real `t` is smaller, so the cap is inert and anchoring is exact.
+					if ( t !== null && t > 0 ) t = Math.min( t, radius * this.dollyToCursorMaxGlide );
+
 					if ( t !== null && t > 0 ) {
 
-						// Move the camera toward the anchor by m = t·(1 − k): the anchor stays
-						// exactly on the cursor ray from C' ( A − C' = t·k·u ).
+						// Move the camera toward the anchor by m = t·(1 − k). Below the horizon
+						// (uncapped `t`) the anchor stays exactly on the cursor ray from C'
+						// ( A − C' = t·k·u ); when `t` is glide-capped it becomes a bounded truck.
 						const m = t * ( 1 - k );
 						const movedCamera = this._movedCamera.copy( C ).addScaledVector( u, m );
 
@@ -209,6 +202,14 @@ export class MapControls extends CameraControls {
 					this._dollyToNoClamp( clamp( radius * dollyScale, this.minDistance, this.maxDistance ), true );
 
 				}
+
+				// The moved target must ease with the SAME (fast, control) smooth-time as the
+				// radius — the wheel handler set `_isUserControllingDolly`, but nothing sets
+				// `_isUserControllingTruck`, so the target would lag on the slow truck
+				// smooth-time and the anchor would visibly two-phase "dolly then yank". With
+				// equal smooth-times (both default to draggingSmoothTime) the point — being
+				// linear in radius for a fixed cursor — stays pinned throughout the ease.
+				this._isUserControllingTruck = true;
 
 				// Zero on both branches (ortho's `zoomTo` already does): keeps the base
 				// update()-drift off even if `infinityDolly` was toggled off mid-ease.
@@ -278,14 +279,22 @@ export class MapControls extends CameraControls {
 
 				if ( t !== null ) {
 
-					const anchor = this._anchor.copy( origin ).addScaledVector( f, t );
+					// In-plane offset from the target to the anchor, glide-capped so grazing
+					// can't explode the shift (bound = visible frustum height × maxGlide).
+					const anchorOffset = this._anchor.copy( origin ).addScaledVector( f, t ).sub( this._targetEnd );
+					const maxGlide = ( ( camera.top - camera.bottom ) / z0 ) * this.dollyToCursorMaxGlide;
+					if ( anchorOffset.length() > maxGlide ) anchorOffset.setLength( maxGlide );
+
 					// Exact scale-toward-anchor: T' = T + (1 − Z0/Z1)·(A − T).
 					const s = 1 - z0 / z1;
-					const newTarget = this._newTarget.copy( this._targetEnd ).lerp( anchor, s );
+					const newTarget = this._newTarget.copy( this._targetEnd ).addScaledVector( anchorOffset, s );
 					this._boundary.clampPoint( newTarget, newTarget );
 
 					this.zoomTo( z1, true );
 					this._targetEnd.copy( newTarget );
+					// Match the target ease to the (fast) zoom ease so the anchor stays pinned
+					// throughout, not just at rest. See the perspective override for the rationale.
+					this._isUserControllingTruck = true;
 					this._needsUpdate = true;
 					return;
 
