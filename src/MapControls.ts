@@ -126,10 +126,17 @@ export class MapControls extends CameraControls {
 					.applyQuaternion( this._yAxisUpSpaceInverse )
 					.add( this._targetEnd );
 
-				// Orientation basis from the (unchanged) camera world matrix.
-				const right = this._right.setFromMatrixColumn( camera.matrixWorld, 0 ).normalize();
-				const up = this._up.setFromMatrixColumn( camera.matrixWorld, 1 ).normalize();
+				// Orientation basis for the END state. A dolly-to-cursor moves the target,
+				// so mid-ease the live orbit camera re-aims at the lagging `_target` and its
+				// matrix columns rotate away from the END orientation. Rebuild the basis from
+				// the END forward `f` + camera up hint (three.js lookAt convention) so the
+				// cursor ray is end-consistent whether notches fire fast or slow.
 				const f = this._forward.subVectors( this._targetEnd, C ).normalize();
+				const right = this._right.crossVectors( f, camera.up );
+				// Degenerate: camera looking along its up axis → stable fallback right.
+				if ( right.lengthSq() < GRAZE_EPSILON ) right.setFromMatrixColumn( camera.matrixWorld, 0 );
+				right.normalize();
+				const up = this._up.crossVectors( right, f ).normalize();
 
 				const tanY = Math.tan( camera.getEffectiveFOV() * DEG2RAD * 0.5 );
 				const tanX = tanY * camera.aspect;
@@ -221,9 +228,13 @@ export class MapControls extends CameraControls {
 					.setFromSpherical( this._sphericalEnd )
 					.applyQuaternion( this._yAxisUpSpaceInverse )
 					.add( this._targetEnd );
-				const right = this._right.setFromMatrixColumn( camera.matrixWorld, 0 ).normalize();
-				const up = this._up.setFromMatrixColumn( camera.matrixWorld, 1 ).normalize();
+				// END-consistent orientation basis (see `_dollyInternal` for why the live
+				// camera matrix would drift during rapid notches).
 				const f = this._forward.subVectors( this._targetEnd, C ).normalize();
+				const right = this._right.crossVectors( f, camera.up );
+				if ( right.lengthSq() < GRAZE_EPSILON ) right.setFromMatrixColumn( camera.matrixWorld, 0 );
+				right.normalize();
+				const up = this._up.crossVectors( right, f ).normalize();
 
 				// Every ortho ray is parallel to `f`; whole-view grazing → zoom only.
 				const forwardDotN = f.dot( n );
