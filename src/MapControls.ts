@@ -132,71 +132,87 @@ export class MapControls extends CameraControls {
 				// the END forward `f` + camera up hint (three.js lookAt convention) so the
 				// cursor ray is end-consistent whether notches fire fast or slow.
 				const f = this._forward.subVectors( this._targetEnd, C ).normalize();
-				const right = this._right.crossVectors( f, camera.up );
-				// Degenerate: camera looking along its up axis → stable fallback right.
-				if ( right.lengthSq() < GRAZE_EPSILON ) right.setFromMatrixColumn( camera.matrixWorld, 0 );
-				right.normalize();
-				const up = this._up.crossVectors( right, f ).normalize();
+				// `forwardDotN <= -GRAZE_EPSILON` means the END forward looks onto the plane.
+				// Near-parallel (polar ≈ 90°, reachable with the default maxPolarAngle = π)
+				// would blow up `tf` below, so gate all anchoring on it and plain-dolly otherwise.
+				const forwardDotN = f.dot( n );
 
-				const tanY = Math.tan( camera.getEffectiveFOV() * DEG2RAD * 0.5 );
-				const tanX = tanY * camera.aspect;
+				let anchored = false;
 
-				// Horizon clamp: bound the grazing / sky case, keep horizontal bearing.
-				let ndcY = y;
-				const upDotN = up.dot( n );
-				if ( ! approxZero( upDotN ) ) {
+				if ( forwardDotN <= - GRAZE_EPSILON ) {
 
-					const yHorizon = - f.dot( n ) / ( tanY * upDotN );
-					if ( yHorizon > 0 ) ndcY = Math.min( ndcY, yHorizon * ( 1 - this.dollyToCursorHorizonShift ) );
+					const right = this._right.crossVectors( f, camera.up );
+					// Degenerate: camera looking along its up axis → stable fallback right.
+					if ( right.lengthSq() < GRAZE_EPSILON ) right.setFromMatrixColumn( camera.matrixWorld, 0 );
+					right.normalize();
+					const up = this._up.crossVectors( right, f ).normalize();
+
+					const tanY = Math.tan( camera.getEffectiveFOV() * DEG2RAD * 0.5 );
+					const tanX = tanY * camera.aspect;
+
+					// Horizon clamp: bound the grazing / sky case, keep horizontal bearing.
+					let ndcY = y;
+					const upDotN = up.dot( n );
+					if ( ! approxZero( upDotN ) ) {
+
+						const yHorizon = - forwardDotN / ( tanY * upDotN );
+						if ( yHorizon > 0 ) ndcY = Math.min( ndcY, yHorizon * ( 1 - this.dollyToCursorHorizonShift ) );
+
+					}
+
+					// Cursor ray direction `u` from the (possibly clamped) NDC.
+					const u = this._cursorDir.copy( f )
+						.addScaledVector( right, x * tanX )
+						.addScaledVector( up, ndcY * tanY )
+						.normalize();
+
+					// Force the ray to point into the plane if it still grazes / rises.
+					let uDotN = u.dot( n );
+					if ( uDotN > - GRAZE_EPSILON ) {
+
+						u.addScaledVector( n, - GRAZE_EPSILON - uDotN ).normalize();
+						uDotN = u.dot( n );
+
+					}
+
+					// Anchor distance along `u` (t > 0, in front of the camera).
+					const t = intersectRayPlane(
+						C.x, C.y, C.z,
+						u.x, u.y, u.z,
+						n.x, n.y, n.z, planeConstant,
+					);
+
+					if ( t !== null && t > 0 ) {
+
+						// Move the camera toward the anchor by m = t·(1 − k): the anchor stays
+						// exactly on the cursor ray from C' ( A − C' = t·k·u ).
+						const m = t * ( 1 - k );
+						const movedCamera = this._movedCamera.copy( C ).addScaledVector( u, m );
+
+						// Re-derive the target on the plane, orientation fixed.
+						const tf = ( planeConstant - movedCamera.dot( n ) ) / forwardDotN;
+						const newTarget = this._newTarget.copy( movedCamera ).addScaledVector( f, tf );
+						this._boundary.clampPoint( newTarget, newTarget );
+
+						// Commit the END state only; easing follows toward it.
+						this._dollyToNoClamp( clamp( tf, this.minDistance, this.maxDistance ), true );
+						this._targetEnd.copy( newTarget );
+						anchored = true;
+
+					}
 
 				}
 
-				// Cursor ray direction `u` from the (possibly clamped) NDC.
-				const u = this._cursorDir.copy( f )
-					.addScaledVector( right, x * tanX )
-					.addScaledVector( up, ndcY * tanY )
-					.normalize();
+				if ( ! anchored ) {
 
-				// Force the ray to point into the plane if it still grazes / rises.
-				let uDotN = u.dot( n );
-				if ( uDotN > - GRAZE_EPSILON ) {
-
-					u.addScaledVector( n, - GRAZE_EPSILON - uDotN ).normalize();
-					uDotN = u.dot( n );
-
-				}
-
-				// Anchor distance along `u` (t > 0, in front of the camera).
-				const t = intersectRayPlane(
-					C.x, C.y, C.z,
-					u.x, u.y, u.z,
-					n.x, n.y, n.z, planeConstant,
-				);
-
-				if ( t !== null && t > 0 ) {
-
-					// Move the camera toward the anchor by m = t·(1 − k): the anchor stays
-					// exactly on the cursor ray from C' ( A − C' = t·k·u ).
-					const m = t * ( 1 - k );
-					const movedCamera = this._movedCamera.copy( C ).addScaledVector( u, m );
-
-					// Re-derive the target on the plane, orientation fixed.
-					const forwardDotN = f.dot( n );
-					const tf = ( planeConstant - movedCamera.dot( n ) ) / forwardDotN;
-					const newTarget = this._newTarget.copy( movedCamera ).addScaledVector( f, tf );
-					this._boundary.clampPoint( newTarget, newTarget );
-
-					// Commit the END state only; easing follows toward it.
-					this._dollyToNoClamp( clamp( tf, this.minDistance, this.maxDistance ), true );
-					this._targetEnd.copy( newTarget );
-
-				} else {
-
-					// Degenerate (camera not above the plane) → plain dolly, no anchor shift.
+					// Grazing / near-parallel / no valid hit → plain dolly, no anchor shift.
 					this._dollyToNoClamp( clamp( radius * dollyScale, this.minDistance, this.maxDistance ), true );
 
 				}
 
+				// Zero on both branches (ortho's `zoomTo` already does): keeps the base
+				// update()-drift off even if `infinityDolly` was toggled off mid-ease.
+				this._changedDolly = 0;
 				this._lastDollyDirection = Math.sign( - delta ) as DOLLY_DIRECTION;
 				this._needsUpdate = true;
 				return;
@@ -275,6 +291,8 @@ export class MapControls extends CameraControls {
 
 				}
 
+				// Defensive net: unreachable given the `forwardDotN` guard above (a valid
+				// forward onto the plane always yields a finite `t`), but bail safely anyway.
 				this.zoomTo( z1, true );
 				return;
 
