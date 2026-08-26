@@ -1,7 +1,8 @@
 import type * as _THREE from 'three';
 import { CameraControls, getInstalledTHREE } from './CameraControls';
-import { DEG2RAD } from './utils/math-utils';
-import { ACTION, type MouseButtons } from './types';
+import { approxZero, DEG2RAD } from './utils/math-utils';
+import { intersectRayPlane, grazeWeight } from './utils/plane-utils';
+import { ACTION, isPerspectiveCamera, isOrthographicCamera, type MouseButtons } from './types';
 
 type NoTruckMouseAction = Exclude<MouseButtons[ 'left' ], typeof ACTION.TRUCK>;
 export interface MapMouseButtons extends MouseButtons {
@@ -92,6 +93,84 @@ export class MapControls extends CameraControls {
 	protected _updateTargetPlaneNormal(): void {
 
 		this._targetPlaneNormal.copy( this._camera.up ).normalize();
+
+	}
+
+	protected override _computeDollyToCursorTarget(): void {
+
+		// infinityDolly + plane confinement is out of scope for v1.
+		if ( this.infinityDolly ) {
+
+			super._computeDollyToCursorTarget();
+			return;
+
+		}
+
+		const camera = this._camera;
+
+		if ( isPerspectiveCamera( camera ) && this._changedDolly !== 0 ) {
+
+			this._updateTargetPlaneNormal();
+			const n = this._normal.copy( this._targetPlaneNormal );
+			const planeConstant = this._targetPlaneConstant;
+
+			const dollyControlAmount = this._spherical.radius - this._lastDistance;
+			const radius = this._sphericalEnd.radius;
+			const prevRadius = radius - dollyControlAmount;
+			const lerpRatio = ( prevRadius - radius ) / radius; // = - Δr / radius
+
+			// cursor ray in world space from NDC
+			const origin = this._origin.setFromMatrixPosition( camera.matrixWorld );
+			const dir = this._dir
+				.set( this._dollyControlCoord.x, this._dollyControlCoord.y, 0.5 )
+				.unproject( camera )
+				.sub( origin )
+				.normalize();
+
+			const dirDotN = dir.dot( n );
+			let w = grazeWeight( dirDotN, this.dollyToCursorGrazeAngle.min, this.dollyToCursorGrazeAngle.max );
+
+			// anchored delta: slide the target toward the on-plane point under the cursor
+			const anchored = this._anchored.set( 0, 0, 0 );
+			const t = intersectRayPlane(
+				origin.x, origin.y, origin.z,
+				dir.x, dir.y, dir.z,
+				n.x, n.y, n.z, planeConstant,
+			);
+			if ( w > 0 && t !== null && t > 0 ) {
+
+				const hit = this._hit.copy( origin ).addScaledVector( dir, t );
+				anchored.subVectors( hit, this._targetEnd ).multiplyScalar( lerpRatio );
+
+			} else {
+
+				w = 0; // no valid hit → pure pan fallback
+
+			}
+
+			// pan fallback: in-plane direction toward the cursor, scaled by the dolly step
+			const horiz = this._horiz.copy( dir ).addScaledVector( n, - dirDotN );
+			if ( horiz.lengthSq() > 0 ) horiz.normalize();
+			const pan = this._pan.copy( horiz ).multiplyScalar( - dollyControlAmount );
+
+			// blend pan → anchored by grazing weight, apply, re-project onto plane
+			const delta = this._delta.copy( pan ).lerp( anchored, w );
+			const newTargetEnd = this._newTarget.copy( this._targetEnd ).add( delta );
+			newTargetEnd.addScaledVector( n, planeConstant - newTargetEnd.dot( n ) );
+			this._boundary.clampPoint( newTargetEnd, newTargetEnd );
+
+			const diff = this._diff.subVectors( newTargetEnd, this._targetEnd );
+			this._targetEnd.copy( newTargetEnd );
+			this._target.add( diff );
+
+			this._changedDolly -= dollyControlAmount;
+			if ( approxZero( this._changedDolly ) ) this._changedDolly = 0;
+
+		} else if ( isOrthographicCamera( camera ) && this._changedZoom !== 0 ) {
+
+			super._computeDollyToCursorTarget(); // ortho handled in Task 7
+
+		}
 
 	}
 
