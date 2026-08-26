@@ -1,8 +1,8 @@
 import type * as _THREE from 'three';
 import { CameraControls, getInstalledTHREE } from './CameraControls';
-import { approxZero, DEG2RAD } from './utils/math-utils';
-import { intersectRayPlane, grazeWeight } from './utils/plane-utils';
-import { ACTION, isPerspectiveCamera, isOrthographicCamera, type MouseButtons } from './types';
+import { clamp, approxZero, DEG2RAD } from './utils/math-utils';
+import { intersectRayPlane } from './utils/plane-utils';
+import { ACTION, DOLLY_DIRECTION, isPerspectiveCamera, isOrthographicCamera, type MouseButtons } from './types';
 
 type NoTruckMouseAction = Exclude<MouseButtons[ 'left' ], typeof ACTION.TRUCK>;
 export interface MapMouseButtons extends MouseButtons {
@@ -12,9 +12,19 @@ export interface MapMouseButtons extends MouseButtons {
 	wheel: NoTruckMouseAction;
 }
 
+// Tolerance for "the ray is parallel to the plane" tests (dot of two unit vectors).
+const GRAZE_EPSILON = 1e-7;
+
 export class MapControls extends CameraControls {
 
-	dollyToCursorGrazeAngle = { min: 15 * DEG2RAD, max: 35 * DEG2RAD };
+	/**
+	 * How far (as a fraction of the screen, toward the center) the cursor anchor
+	 * is pulled back from the horizon when dollying-to-cursor near a grazing angle.
+	 * Larger = trucking starts at a steeper angle and glides gentler; smaller =
+	 * anchoring stays exact closer to the horizon and glides faster. Mapbox's
+	 * `_horizonShift`.
+	 */
+	dollyToCursorHorizonShift = 0.1;
 
 	// This narrowed type steers TS callers away from assigning `ACTION.TRUCK`, but it's
 	// only a compile-time nudge: the base constructor still sets `right = ACTION.TRUCK`
@@ -26,29 +36,29 @@ export class MapControls extends CameraControls {
 	protected _targetPlaneConstant = 0;
 	protected _warnedTruck = false;
 
-	// Scratch vectors for the cursor-anchored dolly/zoom math (Tasks 6-7), reused every
-	// frame to avoid per-frame allocation. Constructed in the constructor, after install
-	// has run. Each has a fixed role in that computation:
+	// Scratch vectors for the cursor-anchored dolly/zoom math, reused every notch to
+	// avoid per-frame allocation. Constructed in the constructor, after install has run.
+	// Each holds one live value at a time during a single computation:
 	/** Working copy of `_targetPlaneNormal` for the current computation. */
 	protected _normal: _THREE.Vector3;
-	/** World-space origin of the cursor ray (camera position, or the ortho unprojected NDC point). */
-	protected _origin: _THREE.Vector3;
-	/** World-space direction of the cursor ray. */
-	protected _dir: _THREE.Vector3;
-	/** Point where the cursor ray intersects the constraint plane. */
-	protected _hit: _THREE.Vector3;
-	/** Cursor ray direction projected onto the plane (component of `_dir` orthogonal to `_normal`); the pan direction. */
-	protected _horiz: _THREE.Vector3;
-	/** Target delta that anchors the on-plane hit point under the cursor. */
-	protected _anchored: _THREE.Vector3;
-	/** Fallback pan delta (in-plane, toward the cursor, scaled by the dolly/zoom step) used when anchoring grazes the plane. */
-	protected _pan: _THREE.Vector3;
-	/** Blend of `_pan` and `_anchored` by the grazing weight - the delta actually applied to the target. */
-	protected _delta: _THREE.Vector3;
-	/** Target-end position after applying `_delta`, re-projecting onto the plane, and clamping to the boundary. */
+	/** END-state camera position `C` (recomputed from `_sphericalEnd` + `_targetEnd`). */
+	protected _endCamera: _THREE.Vector3;
+	/** Camera forward basis `f = normalize( _targetEnd − C )`. */
+	protected _forward: _THREE.Vector3;
+	/** Camera right basis (column 0 of the camera world matrix). */
+	protected _right: _THREE.Vector3;
+	/** Camera up basis (column 1 of the camera world matrix). */
+	protected _up: _THREE.Vector3;
+	/** Cursor ray direction `u` in world space (perspective). */
+	protected _cursorDir: _THREE.Vector3;
+	/** Camera position after the dolly move `C' = C + m·u` (perspective). */
+	protected _movedCamera: _THREE.Vector3;
+	/** World-space origin of the cursor ray at mid-frustum (orthographic). */
+	protected _rayOrigin: _THREE.Vector3;
+	/** World anchor point `A` under the cursor (orthographic). */
+	protected _anchor: _THREE.Vector3;
+	/** Recomputed END-state target `T'`. */
 	protected _newTarget: _THREE.Vector3;
-	/** Actual change applied to `_target` (`_newTarget` minus the previous `_targetEnd`) after boundary clamping. */
-	protected _diff: _THREE.Vector3;
 
 	constructor( camera: _THREE.PerspectiveCamera | _THREE.OrthographicCamera, domElement?: HTMLElement ) {
 
@@ -57,15 +67,15 @@ export class MapControls extends CameraControls {
 		const THREE = getInstalledTHREE();
 		this._targetPlaneNormal = new THREE.Vector3();
 		this._normal = new THREE.Vector3();
-		this._origin = new THREE.Vector3();
-		this._dir = new THREE.Vector3();
-		this._hit = new THREE.Vector3();
-		this._horiz = new THREE.Vector3();
-		this._anchored = new THREE.Vector3();
-		this._pan = new THREE.Vector3();
-		this._delta = new THREE.Vector3();
+		this._endCamera = new THREE.Vector3();
+		this._forward = new THREE.Vector3();
+		this._right = new THREE.Vector3();
+		this._up = new THREE.Vector3();
+		this._cursorDir = new THREE.Vector3();
+		this._movedCamera = new THREE.Vector3();
+		this._rayOrigin = new THREE.Vector3();
+		this._anchor = new THREE.Vector3();
 		this._newTarget = new THREE.Vector3();
-		this._diff = new THREE.Vector3();
 
 		// default plane: horizontal, through the initial target
 		this._updateTargetPlaneNormal();
@@ -92,145 +102,182 @@ export class MapControls extends CameraControls {
 
 		};
 
+		// Mapbox-style EXACT cursor anchoring for perspective dolly-to-cursor.
+		// Computed at input time on the END state so successive wheel notches compose
+		// exactly. Delegates to the base for the non-cursor / infinityDolly / ortho cases.
+		const baseDollyInternal = this._dollyInternal;
+		this._dollyInternal = ( delta: number, x: number, y: number ): void => {
+
+			const camera = this._camera;
+
+			if ( this.dollyToCursor && ! this.infinityDolly && isPerspectiveCamera( camera ) ) {
+
+				const dollyScale = Math.pow( 0.95, - delta * this.dollySpeed );
+				const radius = this._sphericalEnd.radius;
+				const k = clamp( radius * dollyScale, this.minDistance, this.maxDistance ) / radius;
+
+				this._updateTargetPlaneNormal();
+				const n = this._normal.copy( this._targetPlaneNormal );
+				const planeConstant = this._targetPlaneConstant;
+
+				// END camera position (a dolly does not change orientation).
+				const C = this._endCamera
+					.setFromSpherical( this._sphericalEnd )
+					.applyQuaternion( this._yAxisUpSpaceInverse )
+					.add( this._targetEnd );
+
+				// Orientation basis from the (unchanged) camera world matrix.
+				const right = this._right.setFromMatrixColumn( camera.matrixWorld, 0 ).normalize();
+				const up = this._up.setFromMatrixColumn( camera.matrixWorld, 1 ).normalize();
+				const f = this._forward.subVectors( this._targetEnd, C ).normalize();
+
+				const tanY = Math.tan( camera.getEffectiveFOV() * DEG2RAD * 0.5 );
+				const tanX = tanY * camera.aspect;
+
+				// Horizon clamp: bound the grazing / sky case, keep horizontal bearing.
+				let ndcY = y;
+				const upDotN = up.dot( n );
+				if ( ! approxZero( upDotN ) ) {
+
+					const yHorizon = - f.dot( n ) / ( tanY * upDotN );
+					if ( yHorizon > 0 ) ndcY = Math.min( ndcY, yHorizon * ( 1 - this.dollyToCursorHorizonShift ) );
+
+				}
+
+				// Cursor ray direction `u` from the (possibly clamped) NDC.
+				const u = this._cursorDir.copy( f )
+					.addScaledVector( right, x * tanX )
+					.addScaledVector( up, ndcY * tanY )
+					.normalize();
+
+				// Force the ray to point into the plane if it still grazes / rises.
+				let uDotN = u.dot( n );
+				if ( uDotN > - GRAZE_EPSILON ) {
+
+					u.addScaledVector( n, - GRAZE_EPSILON - uDotN ).normalize();
+					uDotN = u.dot( n );
+
+				}
+
+				// Anchor distance along `u` (t > 0, in front of the camera).
+				const t = intersectRayPlane(
+					C.x, C.y, C.z,
+					u.x, u.y, u.z,
+					n.x, n.y, n.z, planeConstant,
+				);
+
+				if ( t !== null && t > 0 ) {
+
+					// Move the camera toward the anchor by m = t·(1 − k): the anchor stays
+					// exactly on the cursor ray from C' ( A − C' = t·k·u ).
+					const m = t * ( 1 - k );
+					const movedCamera = this._movedCamera.copy( C ).addScaledVector( u, m );
+
+					// Re-derive the target on the plane, orientation fixed.
+					const forwardDotN = f.dot( n );
+					const tf = ( planeConstant - movedCamera.dot( n ) ) / forwardDotN;
+					const newTarget = this._newTarget.copy( movedCamera ).addScaledVector( f, tf );
+					this._boundary.clampPoint( newTarget, newTarget );
+
+					// Commit the END state only; easing follows toward it.
+					this._dollyToNoClamp( clamp( tf, this.minDistance, this.maxDistance ), true );
+					this._targetEnd.copy( newTarget );
+
+				} else {
+
+					// Degenerate (camera not above the plane) → plain dolly, no anchor shift.
+					this._dollyToNoClamp( clamp( radius * dollyScale, this.minDistance, this.maxDistance ), true );
+
+				}
+
+				this._lastDollyDirection = Math.sign( - delta ) as DOLLY_DIRECTION;
+				this._needsUpdate = true;
+				return;
+
+			}
+
+			baseDollyInternal( delta, x, y );
+
+		};
+
+		// Mapbox-style EXACT cursor anchoring for orthographic zoom-to-cursor:
+		// scale the target toward the anchor. Delegates to base otherwise.
+		const baseZoomInternal = this._zoomInternal;
+		this._zoomInternal = ( delta: number, x: number, y: number ): void => {
+
+			const camera = this._camera;
+
+			if ( this.dollyToCursor && ! this.infinityDolly && isOrthographicCamera( camera ) ) {
+
+				const zoomScale = Math.pow( 0.95, delta * this.dollySpeed );
+				const z0 = this._zoomEnd;
+				const z1 = clamp( z0 * zoomScale, this.minZoom, this.maxZoom );
+
+				this._updateTargetPlaneNormal();
+				const n = this._normal.copy( this._targetPlaneNormal );
+				const planeConstant = this._targetPlaneConstant;
+
+				const C = this._endCamera
+					.setFromSpherical( this._sphericalEnd )
+					.applyQuaternion( this._yAxisUpSpaceInverse )
+					.add( this._targetEnd );
+				const right = this._right.setFromMatrixColumn( camera.matrixWorld, 0 ).normalize();
+				const up = this._up.setFromMatrixColumn( camera.matrixWorld, 1 ).normalize();
+				const f = this._forward.subVectors( this._targetEnd, C ).normalize();
+
+				// Every ortho ray is parallel to `f`; whole-view grazing → zoom only.
+				const forwardDotN = f.dot( n );
+				if ( forwardDotN > - GRAZE_EPSILON ) {
+
+					this.zoomTo( z1, true );
+					return;
+
+				}
+
+				// Cursor ray origin at the END zoom (mid-frustum), direction `f`.
+				const centerX = ( camera.right + camera.left ) * 0.5;
+				const centerY = ( camera.top + camera.bottom ) * 0.5;
+				const halfW = ( camera.right - camera.left ) * 0.5 / z0;
+				const halfH = ( camera.top - camera.bottom ) * 0.5 / z0;
+				const origin = this._rayOrigin.copy( C )
+					.addScaledVector( right, centerX + x * halfW )
+					.addScaledVector( up, centerY + y * halfH );
+
+				const t = intersectRayPlane(
+					origin.x, origin.y, origin.z,
+					f.x, f.y, f.z,
+					n.x, n.y, n.z, planeConstant,
+				);
+
+				if ( t !== null ) {
+
+					const anchor = this._anchor.copy( origin ).addScaledVector( f, t );
+					// Exact scale-toward-anchor: T' = T + (1 − Z0/Z1)·(A − T).
+					const s = 1 - z0 / z1;
+					const newTarget = this._newTarget.copy( this._targetEnd ).lerp( anchor, s );
+					this._boundary.clampPoint( newTarget, newTarget );
+
+					this.zoomTo( z1, true );
+					this._targetEnd.copy( newTarget );
+					this._needsUpdate = true;
+					return;
+
+				}
+
+				this.zoomTo( z1, true );
+				return;
+
+			}
+
+			baseZoomInternal( delta, x, y );
+
+		};
+
 	}
 
 	protected _updateTargetPlaneNormal(): void {
 
 		this._targetPlaneNormal.copy( this._camera.up ).normalize();
-
-	}
-
-	protected override _computeDollyToCursorTarget(): void {
-
-		// infinityDolly + plane confinement is out of scope for v1.
-		if ( this.infinityDolly ) {
-
-			super._computeDollyToCursorTarget();
-			return;
-
-		}
-
-		const camera = this._camera;
-
-		if ( isPerspectiveCamera( camera ) && this._changedDolly !== 0 ) {
-
-			this._updateTargetPlaneNormal();
-			const n = this._normal.copy( this._targetPlaneNormal );
-			const planeConstant = this._targetPlaneConstant;
-
-			const dollyControlAmount = this._spherical.radius - this._lastDistance;
-			const radius = this._sphericalEnd.radius;
-			const prevRadius = radius - dollyControlAmount;
-			const lerpRatio = ( prevRadius - radius ) / radius; // = - Δr / radius
-
-			// cursor ray in world space from NDC
-			const origin = this._origin.setFromMatrixPosition( camera.matrixWorld );
-			const dir = this._dir
-				.set( this._dollyControlCoord.x, this._dollyControlCoord.y, 0.5 )
-				.unproject( camera )
-				.sub( origin )
-				.normalize();
-
-			const dirDotN = dir.dot( n );
-			let w = grazeWeight( dirDotN, this.dollyToCursorGrazeAngle.min, this.dollyToCursorGrazeAngle.max );
-
-			// anchored delta: slide the target toward the on-plane point under the cursor
-			const anchored = this._anchored.set( 0, 0, 0 );
-			const t = intersectRayPlane(
-				origin.x, origin.y, origin.z,
-				dir.x, dir.y, dir.z,
-				n.x, n.y, n.z, planeConstant,
-			);
-			if ( w > 0 && t !== null && t > 0 ) {
-
-				const hit = this._hit.copy( origin ).addScaledVector( dir, t );
-				anchored.subVectors( hit, this._targetEnd ).multiplyScalar( lerpRatio );
-
-			} else {
-
-				w = 0; // no valid hit → pure pan fallback
-
-			}
-
-			// pan fallback: in-plane direction toward the cursor, scaled by the dolly step
-			const horiz = this._horiz.copy( dir ).addScaledVector( n, - dirDotN );
-			if ( horiz.lengthSq() > 0 ) horiz.normalize();
-			const pan = this._pan.copy( horiz ).multiplyScalar( - dollyControlAmount );
-
-			// blend pan → anchored by grazing weight, apply, re-project onto plane
-			const delta = this._delta.copy( pan ).lerp( anchored, w );
-			const newTargetEnd = this._newTarget.copy( this._targetEnd ).add( delta );
-			newTargetEnd.addScaledVector( n, planeConstant - newTargetEnd.dot( n ) );
-			this._boundary.clampPoint( newTargetEnd, newTargetEnd );
-
-			const diff = this._diff.subVectors( newTargetEnd, this._targetEnd );
-			this._targetEnd.copy( newTargetEnd );
-			this._target.add( diff );
-
-			this._changedDolly -= dollyControlAmount;
-			if ( approxZero( this._changedDolly ) ) this._changedDolly = 0;
-
-		} else if ( isOrthographicCamera( camera ) && this._changedZoom !== 0 ) {
-
-			this._updateTargetPlaneNormal();
-			const n = this._normal.copy( this._targetPlaneNormal );
-			const planeConstant = this._targetPlaneConstant;
-
-			const dollyControlAmount = this._zoom - this._lastZoom;
-			const zoom = this._zoom;
-			const prevZoom = zoom - dollyControlAmount;
-			const lerpRatio = - ( prevZoom - zoom ) / zoom;
-
-			// orthographic: every pixel's ray runs along the camera's forward axis
-			const origin = this._origin.set(
-				this._dollyControlCoord.x,
-				this._dollyControlCoord.y,
-				( camera.near + camera.far ) / ( camera.near - camera.far ),
-			).unproject( camera );
-			const dir = this._dir.set( 0, 0, - 1 ).applyQuaternion( camera.quaternion ).normalize();
-
-			const dirDotN = dir.dot( n );
-			let w = grazeWeight( dirDotN, this.dollyToCursorGrazeAngle.min, this.dollyToCursorGrazeAngle.max );
-
-			// anchored delta: slide the target toward the on-plane point under the cursor.
-			// Ortho `t` need not be > 0: the origin is a mid-frustum unproject, so the
-			// plane can lie behind it along `dir`; accept any finite t from a valid hit.
-			const anchored = this._anchored.set( 0, 0, 0 );
-			const t = intersectRayPlane(
-				origin.x, origin.y, origin.z,
-				dir.x, dir.y, dir.z,
-				n.x, n.y, n.z, planeConstant,
-			);
-			if ( w > 0 && t !== null ) {
-
-				const hit = this._hit.copy( origin ).addScaledVector( dir, t );
-				anchored.subVectors( hit, this._targetEnd ).multiplyScalar( lerpRatio );
-
-			} else {
-
-				w = 0; // parallel ray → pure pan fallback
-
-			}
-
-			// pan fallback: in-plane forward direction, scaled by the zoom step
-			const horiz = this._horiz.copy( dir ).addScaledVector( n, - dirDotN );
-			if ( horiz.lengthSq() > 0 ) horiz.normalize();
-			const pan = this._pan.copy( horiz ).multiplyScalar( dollyControlAmount );
-
-			// blend pan → anchored by grazing weight, apply, re-project onto plane
-			const delta = this._delta.copy( pan ).lerp( anchored, w );
-			const newTargetEnd = this._newTarget.copy( this._targetEnd ).add( delta );
-			newTargetEnd.addScaledVector( n, planeConstant - newTargetEnd.dot( n ) );
-			this._boundary.clampPoint( newTargetEnd, newTargetEnd );
-
-			const diff = this._diff.subVectors( newTargetEnd, this._targetEnd );
-			this._targetEnd.copy( newTargetEnd );
-			this._target.add( diff );
-
-			this._changedZoom -= dollyControlAmount;
-			if ( approxZero( this._changedZoom ) ) this._changedZoom = 0;
-
-		}
 
 	}
 
