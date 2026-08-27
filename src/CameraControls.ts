@@ -41,6 +41,13 @@ const SMOOTH_TIME_KEYS: ( keyof SmoothTimes )[] = [ 'rotateAzimuth', 'rotatePola
 const isMac = /Mac/.test( globalThis?.navigator?.platform );
 
 let THREE: THREESubset;
+
+export function getInstalledTHREE(): THREESubset {
+
+	return THREE;
+
+}
+
 let _ORIGIN: _THREE.Vector3;
 let _AXIS_Y: _THREE.Vector3;
 let _AXIS_Z: _THREE.Vector3;
