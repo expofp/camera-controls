@@ -24,6 +24,12 @@ function smoothstep( lo: number, hi: number, x: number ): number {
 
 }
 
+/**
+ * Map-style controls: dolly/zoom-to-cursor anchors the world point under the cursor and
+ * pans stay confined to a target plane. This assumes the camera stays ABOVE the plane, so
+ * keep `maxPolarAngle` below 90° (e.g. 85°): at exactly 90° the forward axis is parallel to
+ * the plane and dolly-to-cursor falls back to a plain dolly (the `f·n` guard prevents NaN).
+ */
 export class MapControls extends CameraControls {
 
 	/**
@@ -225,13 +231,33 @@ export class MapControls extends CameraControls {
 
 					}
 
-					// Blend truck→anchor by w; radius holds at `radius` (truck) and reaches r' (anchor).
-					const shift = truckShift.lerp( anchorShift, w );
+					// Blend truck→anchor by w. Short-circuit the endpoints so the below-horizon
+					// common case ( w === 1 ) is a bit-exact copy of the exact path — independent
+					// of the truck magnitude and free of `a + (b − a)` rounding.
+					const shift = this._truckShift;
+					let rCommitted: number;
+					if ( w >= 1 ) {
+
+						shift.copy( anchorShift ); // exact anchor, no truck contribution
+						rCommitted = rPrime;
+
+					} else if ( w <= 0 ) {
+
+						shift.copy( truckShift ); // pure sky-truck, radius held
+						rCommitted = radius;
+
+					} else {
+
+						shift.copy( truckShift ).lerp( anchorShift, w );
+						rCommitted = radius + ( rPrime - radius ) * w;
+
+					}
+
 					const newTarget = this._newTarget.copy( this._targetEnd ).add( shift );
 					this._boundary.clampPoint( newTarget, newTarget );
 
 					// Commit the END state only; easing follows toward it.
-					this._dollyToNoClamp( clamp( radius + ( rPrime - radius ) * w, this.minDistance, this.maxDistance ), true );
+					this._dollyToNoClamp( clamp( rCommitted, this.minDistance, this.maxDistance ), true );
 					this._targetEnd.copy( newTarget );
 
 				}
@@ -336,8 +362,14 @@ export class MapControls extends CameraControls {
 
 				}
 
-				// Blend truck→anchor by w, apply, commit the END zoom + target only.
-				const shift = truckShift.lerp( anchorShift, w );
+				// Blend truck→anchor by w. Short-circuit the endpoints so the below-horizon
+				// common case ( w === 1 ) is a bit-exact copy of the exact anchor shift,
+				// independent of the truck magnitude. (The END zoom always commits z1.)
+				const shift = this._truckShift;
+				if ( w >= 1 ) shift.copy( anchorShift );
+				else if ( w <= 0 ) shift.copy( truckShift );
+				else shift.copy( truckShift ).lerp( anchorShift, w );
+
 				const newTarget = this._newTarget.copy( this._targetEnd ).add( shift );
 				this._boundary.clampPoint( newTarget, newTarget );
 
