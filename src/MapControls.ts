@@ -186,12 +186,20 @@ export class MapControls extends CameraControls {
 					const sLo = Math.sin( 0.5 * this.dollyToCursorHorizonAngle );
 					let w = smoothstep( sLo, sHi, s );
 
-					// SKY-TRUCK shift: screen-pan along the cursor's in-plane ground bearing
-					// h = u − (u·n)·n = u + s·n, scaled like a wheel-truck (∝ radius, tuned by
-					// `truckSpeed`) — bounded and independent of the grazing angle (NOT ∝ 1/s).
+					// SKY-TRUCK shift: a real wheel-truck screen-pan along the cursor's in-plane
+					// ground bearing h = u − (u·n)·n = u + s·n. Magnitude mirrors the base
+					// `_truckInternal` (perspective): truckSpeed · wheelPixels · targetDistance /
+					// viewportHeight, targetDistance = radius · tan(fov/2). `wheelPixels`
+					// reconstructs |event.deltaY| from the `delta` param (handler:
+					// delta = deltaY/(deltaYFactor·10), deltaYFactor = −3 non-mac ⇒ ×30);
+					// `truckSpeed` is the real tuning knob. Signed by the dolly direction so
+					// zoom-in glides toward the bearing and zoom-out away (NOT ∝ 1/s).
 					const bearing = this._bearing.copy( u ).addScaledVector( n, s );
 					if ( bearing.lengthSq() > GRAZE_EPSILON ) bearing.normalize();
-					const truckShift = this._truckShift.copy( bearing ).multiplyScalar( this.truckSpeed * radius * ( 1 - k ) );
+					const wheelPixels = Math.abs( delta ) * 30;
+					const targetDistance = radius * tanY;
+					const truckMagnitude = this.truckSpeed * wheelPixels * targetDistance / this._elementRect.height;
+					const truckShift = this._truckShift.copy( bearing ).multiplyScalar( Math.sign( 1 - k ) * truckMagnitude );
 
 					// EXACT-ANCHOR shift (only where w > 0; there s ≥ sLo ⇒ the ray hits the plane
 					// so `t` is finite). Pure-truck keeps the radius ≈ constant.
@@ -291,11 +299,15 @@ export class MapControls extends CameraControls {
 				const zoomStep = 1 - z0 / z1;
 
 				// SKY-TRUCK shift along the in-plane forward bearing h = f − (f·n)·n = f + s·n
-				// (all ortho rays share `f`), scaled like a wheel-truck (∝ frustum height,
-				// tuned by `truckSpeed`).
+				// (all ortho rays share `f`). Magnitude mirrors the base ortho `_truckInternal`
+				// (forward axis): truckSpeed · wheelPixels · (top−bottom)/zoom / viewportHeight
+				// = truckSpeed · wheelPixels · frustumWorldHeight / viewportHeight. Same
+				// `wheelPixels` reconstruction (×30) as perspective; signed by the zoom direction.
 				const bearing = this._bearing.copy( f ).addScaledVector( n, s );
 				if ( bearing.lengthSq() > GRAZE_EPSILON ) bearing.normalize();
-				const truckShift = this._truckShift.copy( bearing ).multiplyScalar( this.truckSpeed * frustumWorldHeight * zoomStep );
+				const wheelPixels = Math.abs( delta ) * 30;
+				const truckMagnitude = this.truckSpeed * wheelPixels * frustumWorldHeight / this._elementRect.height;
+				const truckShift = this._truckShift.copy( bearing ).multiplyScalar( Math.sign( zoomStep ) * truckMagnitude );
 
 				// EXACT-ANCHOR shift (only where w > 0; there s ≥ sLo ⇒ f·n ≠ 0 ⇒ finite anchor).
 				const anchorShift = this._anchorShift.set( 0, 0, 0 );
