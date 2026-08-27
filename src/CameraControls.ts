@@ -2649,8 +2649,7 @@ export class CameraControls extends EventDispatcher {
 
 		} else {
 
-			const smoothTime = this._isUserControllingTruck ? this._controlSmoothTime.truck : this._smoothTime.truck;
-			smoothDampVec3( this._target, this._targetEnd, this._targetVelocity, smoothTime, this.maxSpeed, delta, this._target );
+			smoothDampVec3( this._target, this._targetEnd, this._targetVelocity, this._getTargetSmoothTime(), this.maxSpeed, delta, this._target );
 			this._needsUpdate = true;
 
 		}
@@ -3374,6 +3373,17 @@ export class CameraControls extends EventDispatcher {
 
 		console.warn( '.draggingSmoothTime has been deprecated. use controlSmoothTime instead.' );
 		this._applySmoothTime( this._controlSmoothTime, value );
+
+	}
+
+	/**
+	 * The smoothTime the target ease uses this frame. Extracted as a seam for subclasses that
+	 * move the target as PART OF another operation (e.g. MapControls' dolly-to-cursor) and so
+	 * need it to ease on that operation's clock rather than the truck's.
+	 */
+	protected _getTargetSmoothTime(): number {
+
+		return this._isUserControllingTruck ? this._controlSmoothTime.truck : this._smoothTime.truck;
 
 	}
 

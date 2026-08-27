@@ -59,6 +59,12 @@ export class MapControls extends CameraControls {
 	protected _targetPlaneConstant = 0;
 	protected _warnedTruck = false;
 
+	/**
+	 * True while `_targetEnd` was last moved BY dolly/zoom-to-cursor rather than by a pan.
+	 * Gates `_getTargetSmoothTime` onto the dolly/zoom clock; see it for why.
+	 */
+	protected _targetFollowsDolly = false;
+
 	// Scratch vectors for the cursor-anchored dolly/zoom math, reused every notch to
 	// avoid per-frame allocation. Constructed in the constructor, after install has run.
 	// Each holds one live value at a time during a single computation:
@@ -126,6 +132,10 @@ export class MapControls extends CameraControls {
 				screenSpacePanning = true;
 
 			}
+
+			// A real pan takes ownership of the target back from any in-flight dolly-to-cursor,
+			// so it eases on the truck clock again. OFFSET moves `_focalOffset`, not the target.
+			if ( ! dragToOffset ) this._targetFollowsDolly = false;
 
 			baseTruckInternal( deltaX, deltaY, dragToOffset, screenSpacePanning );
 
@@ -270,13 +280,15 @@ export class MapControls extends CameraControls {
 
 				}
 
-				// The moved target must ease with the SAME (fast, control) smooth-time as the
-				// radius — the wheel handler set `_isUserControllingDolly`, but nothing sets
-				// `_isUserControllingTruck`, so the target would lag on the slow truck
-				// smooth-time and the anchor would visibly two-phase "dolly then yank". With
-				// equal smooth-times (both default to draggingSmoothTime) the point — being
-				// linear in radius for a fixed cursor — stays pinned throughout the ease.
+				// The moved target must ease in LOCKSTEP with the radius: the whole move is
+				// committed to the END state, and the camera `C = target + radius·d` traces the
+				// straight line through the anchor only while both eases sit at the same
+				// normalized progress. `_isUserControllingTruck` marks the target as
+				// user-driven (the wheel handler only sets `_isUserControllingDolly`);
+				// `_targetFollowsDolly` then routes it onto the dolly's clock in
+				// `_getTargetSmoothTime`, so the lockstep holds whatever `controlSmoothTime.truck` is.
 				this._isUserControllingTruck = true;
+				this._targetFollowsDolly = true;
 
 				// Zero on both branches (ortho's `zoomTo` already does): keeps the base
 				// update()-drift off even if `infinityDolly` was toggled off mid-ease.
@@ -287,6 +299,7 @@ export class MapControls extends CameraControls {
 
 			}
 
+			this._targetFollowsDolly = false;
 			baseDollyInternal( delta, x, y );
 
 		};
@@ -384,17 +397,57 @@ export class MapControls extends CameraControls {
 
 				this.zoomTo( z1, true );
 				this._targetEnd.copy( newTarget );
-				// Match the target ease to the (fast) zoom ease so the anchor stays pinned
-				// throughout, not just at rest. See the perspective override for the rationale.
+				// Match the target ease to the zoom ease so the anchor tracks the cursor through
+				// the ease, not just at rest. See the perspective override for the rationale.
+				//
+				// KNOWN LIMITATION (fix before the upstream PR): unlike perspective, matching the
+				// clocks does NOT make ortho pinning exact mid-ease — only at the endpoints. The
+				// anchor's screen position is ∝ ( A − T( t ) ) · zoom( t ), so holding it fixed
+				// requires the HARMONIC law
+				//     zoom( t ) = z0 / ( 1 − p( t )·( 1 − z0 / z1 ) ),   p = the target's progress,
+				// whereas `_zoom` is smoothDamp'd toward `z1` linearly. The two agree at p = 0 and
+				// p = 1 and diverge in between, so the cursor point drifts and returns (~0.26 world
+				// units for one notch in the example scene). Perspective has no such gap: there the
+				// camera moves along a straight line, which linear interpolation reproduces exactly.
+				// Fixing it means driving `_target` from the LIVE `_zoom` each frame — i.e. inverting
+				// the law above for p — rather than easing it independently.
 				this._isUserControllingTruck = true;
+				this._targetFollowsDolly = true;
 				this._needsUpdate = true;
 				return;
 
 			}
 
+			this._targetFollowsDolly = false;
 			baseZoomInternal( delta, x, y );
 
 		};
+
+	}
+
+	/**
+	 * Dolly/zoom-to-cursor moves the target as PART OF the dolly, so ease it on the dolly's
+	 * clock (the zoom's, for orthographic) instead of the truck's. `controlSmoothTime.truck = 0`
+	 * is a natural setting for map-style 1:1 drag panning; without this the target would snap
+	 * there while the radius kept easing, breaking the lockstep the exact anchoring depends on
+	 * and yanking the world out from under the cursor. Resolved the same way the radius/zoom
+	 * ease resolves its own smooth-time, so the two always match.
+	 *
+	 * Falls back to the base (truck) resolution for real pans, and — via
+	 * `_isUserControllingTruck`, which every programmatic move clears — whenever the target is
+	 * no longer under user control.
+	 */
+	protected _getTargetSmoothTime(): number {
+
+		if ( this._targetFollowsDolly && this._isUserControllingTruck ) {
+
+			return isOrthographicCamera( this._camera ) ?
+				( this._isUserControllingZoom  ? this._controlSmoothTime.zoom  : this._smoothTime.zoom  ) :
+				( this._isUserControllingDolly ? this._controlSmoothTime.dolly : this._smoothTime.dolly );
+
+		}
+
+		return super._getTargetSmoothTime();
 
 	}
 
