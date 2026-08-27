@@ -15,6 +15,11 @@ export interface MapMouseButtons extends MouseButtons {
 // Tolerance for "the ray is parallel to the plane" tests (dot of two unit vectors).
 const GRAZE_EPSILON = 1e-7;
 
+// Mirrors CameraControls' own platform check (not exported): the wheel handler normalizes
+// `event.deltaY` by `deltaYFactor = isMac ? -1 : -3`, which the sky-truck inverts to recover
+// the raw wheel pixels per-platform.
+const isMac = /Mac/.test( globalThis?.navigator?.platform );
+
 // Hermite smoothstep: 0 at/below `lo`, 1 at/above `hi`, smooth in between.
 function smoothstep( lo: number, hi: number, x: number ): number {
 
@@ -202,7 +207,10 @@ export class MapControls extends CameraControls {
 					// zoom-in glides toward the bearing and zoom-out away (NOT ∝ 1/s).
 					const bearing = this._bearing.copy( u ).addScaledVector( n, s );
 					if ( bearing.lengthSq() > GRAZE_EPSILON ) bearing.normalize();
-					const wheelPixels = Math.abs( delta ) * 30;
+					// Recover the raw |event.deltaY| per-platform via the base `deltaYFactor`
+					// (mac factor 1 ⇒ ×10, non-mac factor 3 ⇒ ×30) so the sky-pan matches a real
+					// wheel-truck on both platforms.
+					const wheelPixels = Math.abs( delta ) * ( isMac ? 10 : 30 );
 					const targetDistance = radius * tanY;
 					const truckMagnitude = this.truckSpeed * wheelPixels * targetDistance / this._elementRect.height;
 					const truckShift = this._truckShift.copy( bearing ).multiplyScalar( Math.sign( 1 - k ) * truckMagnitude );
@@ -328,10 +336,11 @@ export class MapControls extends CameraControls {
 				// (all ortho rays share `f`). Magnitude mirrors the base ortho `_truckInternal`
 				// (forward axis): truckSpeed · wheelPixels · (top−bottom)/zoom / viewportHeight
 				// = truckSpeed · wheelPixels · frustumWorldHeight / viewportHeight. Same
-				// `wheelPixels` reconstruction (×30) as perspective; signed by the zoom direction.
+				// per-platform `wheelPixels` reconstruction (isMac ? ×10 : ×30) as perspective;
+				// signed by the zoom direction.
 				const bearing = this._bearing.copy( f ).addScaledVector( n, s );
 				if ( bearing.lengthSq() > GRAZE_EPSILON ) bearing.normalize();
-				const wheelPixels = Math.abs( delta ) * 30;
+				const wheelPixels = Math.abs( delta ) * ( isMac ? 10 : 30 );
 				const truckMagnitude = this.truckSpeed * wheelPixels * frustumWorldHeight / this._elementRect.height;
 				const truckShift = this._truckShift.copy( bearing ).multiplyScalar( Math.sign( zoomStep ) * truckMagnitude );
 
