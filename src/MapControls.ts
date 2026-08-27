@@ -15,18 +15,28 @@ export interface MapMouseButtons extends MouseButtons {
 // Tolerance for "the ray is parallel to the plane" tests (dot of two unit vectors).
 const GRAZE_EPSILON = 1e-7;
 
+// Hermite smoothstep: 0 at/below `lo`, 1 at/above `hi`, smooth in between.
+function smoothstep( lo: number, hi: number, x: number ): number {
+
+	if ( lo === hi ) return x < lo ? 0 : 1;
+	const t = clamp( ( x - lo ) / ( hi - lo ), 0, 1 );
+	return t * t * ( 3 - 2 * t );
+
+}
+
 export class MapControls extends CameraControls {
 
 	/**
-	 * Caps the cursor-anchor distance for dolly/zoom-to-cursor, as a multiple of the
-	 * orbit radius (perspective) or the visible frustum height (orthographic). Below the
-	 * horizon the true anchor is usually nearer than the cap, so anchoring stays EXACT and
-	 * this has no effect. Near/above the horizon the anchor distance explodes (the ray runs
-	 * near-parallel to the plane), so the cap bounds it: one wheel notch then glides at most
-	 * ~`radius · dollyToCursorMaxGlide · (1 − dollyScale)` along the cursor's ground bearing,
-	 * scaling with the zoom level. Larger = longer/faster sky glide; smaller = shorter.
+	 * Grazing angle (radians) at which dolly-to-cursor (perspective) / zoom-to-cursor
+	 * (orthographic) hands off from EXACT anchoring to a sky-truck. Anchoring is exact
+	 * wherever the cursor ray meets the ground more steeply than this angle. Within a thin
+	 * band just above it — `[sin(0.5·angle), sin(angle)]` in the ray's grazing measure — the
+	 * anchor blends smoothly into a screen-pan along the cursor's ground bearing; above it
+	 * (the sky) it is a pure pan. Keep it small (a couple of degrees at the horizon):
+	 * widening it erodes the exact region below. The sky-pan SPEED is governed by
+	 * `truckSpeed` (it feels like a wheel-pan), not by this angle.
 	 */
-	dollyToCursorMaxGlide = 3;
+	dollyToCursorHorizonAngle = 6 * DEG2RAD;
 
 	// This narrowed type steers TS callers away from assigning `ACTION.TRUCK`, but it's
 	// only a compile-time nudge: the base constructor still sets `right = ACTION.TRUCK`
@@ -57,8 +67,12 @@ export class MapControls extends CameraControls {
 	protected _movedCamera: _THREE.Vector3;
 	/** World-space origin of the cursor ray at mid-frustum (orthographic). */
 	protected _rayOrigin: _THREE.Vector3;
-	/** In-plane offset from `_targetEnd` to the (glide-capped) cursor anchor (orthographic). */
-	protected _anchor: _THREE.Vector3;
+	/** In-plane unit bearing of the cursor ray toward the ground (the sky-truck direction). */
+	protected _bearing: _THREE.Vector3;
+	/** Sky-truck target-shift vector (screen-pan along `_bearing`). */
+	protected _truckShift: _THREE.Vector3;
+	/** Exact-anchor target-shift vector (moves the target to pin the cursor point). */
+	protected _anchorShift: _THREE.Vector3;
 	/** Recomputed END-state target `T'`. */
 	protected _newTarget: _THREE.Vector3;
 
@@ -76,7 +90,9 @@ export class MapControls extends CameraControls {
 		this._cursorDir = new THREE.Vector3();
 		this._movedCamera = new THREE.Vector3();
 		this._rayOrigin = new THREE.Vector3();
-		this._anchor = new THREE.Vector3();
+		this._bearing = new THREE.Vector3();
+		this._truckShift = new THREE.Vector3();
+		this._anchorShift = new THREE.Vector3();
 		this._newTarget = new THREE.Vector3();
 
 		// default plane: horizontal, through the initial target
@@ -139,9 +155,13 @@ export class MapControls extends CameraControls {
 				// would blow up `tf` below, so gate all anchoring on it and plain-dolly otherwise.
 				const forwardDotN = f.dot( n );
 
-				let anchored = false;
+				if ( forwardDotN > - GRAZE_EPSILON ) {
 
-				if ( forwardDotN <= - GRAZE_EPSILON ) {
+					// Camera nearly parallel to the plane (polar ≈ 90°) ⇒ `tf` would blow up →
+					// plain dolly, no anchor shift.
+					this._dollyToNoClamp( clamp( radius * dollyScale, this.minDistance, this.maxDistance ), true );
+
+				} else {
 
 					const right = this._right.crossVectors( f, camera.up );
 					// Degenerate: camera looking along its up axis → stable fallback right.
@@ -158,48 +178,53 @@ export class MapControls extends CameraControls {
 						.addScaledVector( up, y * tanY )
 						.normalize();
 
-					// Hard direction floor: a sky / grazing ray ( u·n ≥ 0 ) can never hit the
-					// plane, so redirect it just below horizontal along its ground bearing.
-					const uDotN = u.dot( n );
-					if ( uDotN > - GRAZE_EPSILON ) u.addScaledVector( n, - GRAZE_EPSILON - uDotN ).normalize();
+					// Grazing measure s = −u·n: s > 0 the ray descends onto the plane, larger =
+					// steeper. Thin horizon band [sLo, sHi] = [sin(½·angle), sin(angle)]. Blend
+					// weight w: 1 below the band (exact anchor), 0 above it (pure sky-truck).
+					const s = - u.dot( n );
+					const sHi = Math.sin( this.dollyToCursorHorizonAngle );
+					const sLo = Math.sin( 0.5 * this.dollyToCursorHorizonAngle );
+					let w = smoothstep( sLo, sHi, s );
 
-					// Anchor distance along `u` (t > 0, in front of the camera).
-					let t = intersectRayPlane(
-						C.x, C.y, C.z,
-						u.x, u.y, u.z,
-						n.x, n.y, n.z, planeConstant,
-					);
+					// SKY-TRUCK shift: screen-pan along the cursor's in-plane ground bearing
+					// h = u − (u·n)·n = u + s·n, scaled like a wheel-truck (∝ radius, tuned by
+					// `truckSpeed`) — bounded and independent of the grazing angle (NOT ∝ 1/s).
+					const bearing = this._bearing.copy( u ).addScaledVector( n, s );
+					if ( bearing.lengthSq() > GRAZE_EPSILON ) bearing.normalize();
+					const truckShift = this._truckShift.copy( bearing ).multiplyScalar( this.truckSpeed * radius * ( 1 - k ) );
 
-					// Glide cap: near/above the horizon `t` explodes, so bound it. Below the
-					// horizon the real `t` is smaller, so the cap is inert and anchoring is exact.
-					if ( t !== null && t > 0 ) t = Math.min( t, radius * this.dollyToCursorMaxGlide );
+					// EXACT-ANCHOR shift (only where w > 0; there s ≥ sLo ⇒ the ray hits the plane
+					// so `t` is finite). Pure-truck keeps the radius ≈ constant.
+					const anchorShift = this._anchorShift.set( 0, 0, 0 );
+					let rPrime = radius;
+					if ( w > 0 ) {
 
-					if ( t !== null && t > 0 ) {
+						const t = intersectRayPlane( C.x, C.y, C.z, u.x, u.y, u.z, n.x, n.y, n.z, planeConstant );
+						if ( t !== null && t > 0 ) {
 
-						// Move the camera toward the anchor by m = t·(1 − k). Below the horizon
-						// (uncapped `t`) the anchor stays exactly on the cursor ray from C'
-						// ( A − C' = t·k·u ); when `t` is glide-capped it becomes a bounded truck.
-						const m = t * ( 1 - k );
-						const movedCamera = this._movedCamera.copy( C ).addScaledVector( u, m );
+							// Move the camera along `u` by m = t·(1 − k): the anchor stays exactly
+							// on the cursor ray from C' ( A − C' = t·k·u ). Re-derive the target
+							// on the plane (orientation fixed): T' = C' + r'·f, r' = tf.
+							const movedCamera = this._movedCamera.copy( C ).addScaledVector( u, t * ( 1 - k ) );
+							rPrime = ( planeConstant - movedCamera.dot( n ) ) / forwardDotN;
+							anchorShift.copy( movedCamera ).addScaledVector( f, rPrime ).sub( this._targetEnd );
 
-						// Re-derive the target on the plane, orientation fixed.
-						const tf = ( planeConstant - movedCamera.dot( n ) ) / forwardDotN;
-						const newTarget = this._newTarget.copy( movedCamera ).addScaledVector( f, tf );
-						this._boundary.clampPoint( newTarget, newTarget );
+						} else {
 
-						// Commit the END state only; easing follows toward it.
-						this._dollyToNoClamp( clamp( tf, this.minDistance, this.maxDistance ), true );
-						this._targetEnd.copy( newTarget );
-						anchored = true;
+							w = 0; // degenerate hit ⇒ pure truck
+
+						}
 
 					}
 
-				}
+					// Blend truck→anchor by w; radius holds at `radius` (truck) and reaches r' (anchor).
+					const shift = truckShift.lerp( anchorShift, w );
+					const newTarget = this._newTarget.copy( this._targetEnd ).add( shift );
+					this._boundary.clampPoint( newTarget, newTarget );
 
-				if ( ! anchored ) {
-
-					// Grazing / near-parallel / no valid hit → plain dolly, no anchor shift.
-					this._dollyToNoClamp( clamp( radius * dollyScale, this.minDistance, this.maxDistance ), true );
+					// Commit the END state only; easing follows toward it.
+					this._dollyToNoClamp( clamp( radius + ( rPrime - radius ) * w, this.minDistance, this.maxDistance ), true );
+					this._targetEnd.copy( newTarget );
 
 				}
 
@@ -253,56 +278,63 @@ export class MapControls extends CameraControls {
 				right.normalize();
 				const up = this._up.crossVectors( right, f ).normalize();
 
-				// Every ortho ray is parallel to `f`; whole-view grazing → zoom only.
+				// Every ortho ray is parallel to `f`, so the whole view shares one grazing
+				// measure s = −f·n. Same thin horizon band as perspective: below it exact
+				// anchor, above it (whole-view grazing) a sky-truck, blend inside.
 				const forwardDotN = f.dot( n );
-				if ( forwardDotN > - GRAZE_EPSILON ) {
+				const s = - forwardDotN;
+				const sHi = Math.sin( this.dollyToCursorHorizonAngle );
+				const sLo = Math.sin( 0.5 * this.dollyToCursorHorizonAngle );
+				let w = smoothstep( sLo, sHi, s );
 
-					this.zoomTo( z1, true );
-					return;
+				const frustumWorldHeight = ( camera.top - camera.bottom ) / z0;
+				const zoomStep = 1 - z0 / z1;
 
-				}
+				// SKY-TRUCK shift along the in-plane forward bearing h = f − (f·n)·n = f + s·n
+				// (all ortho rays share `f`), scaled like a wheel-truck (∝ frustum height,
+				// tuned by `truckSpeed`).
+				const bearing = this._bearing.copy( f ).addScaledVector( n, s );
+				if ( bearing.lengthSq() > GRAZE_EPSILON ) bearing.normalize();
+				const truckShift = this._truckShift.copy( bearing ).multiplyScalar( this.truckSpeed * frustumWorldHeight * zoomStep );
 
-				// Cursor ray origin at the END zoom (mid-frustum), direction `f`.
-				const centerX = ( camera.right + camera.left ) * 0.5;
-				const centerY = ( camera.top + camera.bottom ) * 0.5;
-				const halfW = ( camera.right - camera.left ) * 0.5 / z0;
-				const halfH = ( camera.top - camera.bottom ) * 0.5 / z0;
-				const origin = this._rayOrigin.copy( C )
-					.addScaledVector( right, centerX + x * halfW )
-					.addScaledVector( up, centerY + y * halfH );
+				// EXACT-ANCHOR shift (only where w > 0; there s ≥ sLo ⇒ f·n ≠ 0 ⇒ finite anchor).
+				const anchorShift = this._anchorShift.set( 0, 0, 0 );
+				if ( w > 0 ) {
 
-				const t = intersectRayPlane(
-					origin.x, origin.y, origin.z,
-					f.x, f.y, f.z,
-					n.x, n.y, n.z, planeConstant,
-				);
+					// Cursor ray origin at the END zoom (mid-frustum), direction `f`.
+					const centerX = ( camera.right + camera.left ) * 0.5;
+					const centerY = ( camera.top + camera.bottom ) * 0.5;
+					const halfW = ( camera.right - camera.left ) * 0.5 / z0;
+					const halfH = frustumWorldHeight * 0.5;
+					const origin = this._rayOrigin.copy( C )
+						.addScaledVector( right, centerX + x * halfW )
+						.addScaledVector( up, centerY + y * halfH );
 
-				if ( t !== null ) {
+					const t = intersectRayPlane( origin.x, origin.y, origin.z, f.x, f.y, f.z, n.x, n.y, n.z, planeConstant );
+					if ( t !== null ) {
 
-					// In-plane offset from the target to the anchor, glide-capped so grazing
-					// can't explode the shift (bound = visible frustum height × maxGlide).
-					const anchorOffset = this._anchor.copy( origin ).addScaledVector( f, t ).sub( this._targetEnd );
-					const maxGlide = ( ( camera.top - camera.bottom ) / z0 ) * this.dollyToCursorMaxGlide;
-					if ( anchorOffset.length() > maxGlide ) anchorOffset.setLength( maxGlide );
+						// A = origin + t·f; exact scale-toward-anchor shift = zoomStep·(A − T).
+						anchorShift.copy( origin ).addScaledVector( f, t ).sub( this._targetEnd ).multiplyScalar( zoomStep );
 
-					// Exact scale-toward-anchor: T' = T + (1 − Z0/Z1)·(A − T).
-					const s = 1 - z0 / z1;
-					const newTarget = this._newTarget.copy( this._targetEnd ).addScaledVector( anchorOffset, s );
-					this._boundary.clampPoint( newTarget, newTarget );
+					} else {
 
-					this.zoomTo( z1, true );
-					this._targetEnd.copy( newTarget );
-					// Match the target ease to the (fast) zoom ease so the anchor stays pinned
-					// throughout, not just at rest. See the perspective override for the rationale.
-					this._isUserControllingTruck = true;
-					this._needsUpdate = true;
-					return;
+						w = 0; // degenerate hit ⇒ pure truck
+
+					}
 
 				}
 
-				// Defensive net: unreachable given the `forwardDotN` guard above (a valid
-				// forward onto the plane always yields a finite `t`), but bail safely anyway.
+				// Blend truck→anchor by w, apply, commit the END zoom + target only.
+				const shift = truckShift.lerp( anchorShift, w );
+				const newTarget = this._newTarget.copy( this._targetEnd ).add( shift );
+				this._boundary.clampPoint( newTarget, newTarget );
+
 				this.zoomTo( z1, true );
+				this._targetEnd.copy( newTarget );
+				// Match the target ease to the (fast) zoom ease so the anchor stays pinned
+				// throughout, not just at rest. See the perspective override for the rationale.
+				this._isUserControllingTruck = true;
+				this._needsUpdate = true;
 				return;
 
 			}
