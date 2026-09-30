@@ -537,6 +537,31 @@ Similar to `setLookAt`, but it interpolates between two states.
 
 ---
 
+#### `userTransition( transition )`
+
+Runs camera moves as though the user made them by hand. The moves ease by `controlSmoothTime` instead of `smoothTime`, and a `control` event reports them, as it does a drag.
+
+Use it for gestures that you recognize outside the controls, for example a double tap or a two-finger twist from a gesture library. Those gestures can move the camera only through the methods above, and each method otherwise marks its move as programmatic.
+
+Every method that you call while a transition runs marks its axes as user-controlled. This includes a method that you call after an `await`, so one transition can hold a sequence of moves. A method called from other code during the transition is marked the same way. The marks are cleared when the last running transition settles.
+
+In `MapControls`, a target that moves while the distance changes eases on the dolly's clock, as the wheel's dolly-to-cursor does. A zoom about a point, made from `moveTo` and `dollyTo`, then stays in step even with `controlSmoothTime.truck = 0`.
+
+```js
+await cameraControls.userTransition( () => Promise.all( [
+	cameraControls.moveTo( x, y, z, true ),
+	cameraControls.dollyTo( distance, true ),
+] ) );
+```
+
+| Name         | Type                     | Description |
+| ------------ | ------------------------ | ----------- |
+| `transition` | `() => Promise<T>`       | Makes the moves. Its promise must settle only after the moves do. |
+
+Returns what `transition` returns.
+
+---
+
 #### `setPosition( positionX, positionY, positionZ, enableTransition )`
 
 Set angle and distance by given position.

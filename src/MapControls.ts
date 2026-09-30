@@ -1,8 +1,8 @@
 import type * as _THREE from 'three';
 import { CameraControls, getInstalledTHREE } from './CameraControls';
-import { clamp, DEG2RAD } from './utils/math-utils';
+import { approxEquals, clamp, DEG2RAD } from './utils/math-utils';
 import { intersectRayPlane } from './utils/plane-utils';
-import { ACTION, DOLLY_DIRECTION, isPerspectiveCamera, isOrthographicCamera, type MouseButtons } from './types';
+import { ACTION, DOLLY_DIRECTION, isPerspectiveCamera, isOrthographicCamera, type CameraControlsLerpState, type MouseButtons } from './types';
 
 type NoTruckMouseAction = Exclude<MouseButtons[ 'left' ], typeof ACTION.TRUCK>;
 export interface MapMouseButtons extends MouseButtons {
@@ -60,8 +60,9 @@ export class MapControls extends CameraControls {
 	protected _warnedTruck = false;
 
 	/**
-	 * True while `_targetEnd` was last moved BY dolly/zoom-to-cursor rather than by a pan.
-	 * Gates `_getTargetSmoothTime` onto the dolly/zoom clock; see it for why.
+	 * True while `_targetEnd` was last moved BY dolly/zoom-to-cursor rather than by a pan, or
+	 * together with the distance inside a `userTransition`. Gates `_getTargetSmoothTime` onto
+	 * the dolly/zoom clock; see it for why.
 	 */
 	protected _targetFollowsDolly = false;
 
@@ -448,6 +449,82 @@ export class MapControls extends CameraControls {
 		}
 
 		return super._getTargetSmoothTime();
+
+	}
+
+	dollyTo( distance: number, enableTransition: boolean = false ): Promise<void> {
+
+		const rest = super.dollyTo( distance, enableTransition );
+		this._followDollyInUserTransition();
+		return rest;
+
+	}
+
+	zoomTo( zoom: number, enableTransition: boolean = false ): Promise<void> {
+
+		const rest = super.zoomTo( zoom, enableTransition );
+		this._followDollyInUserTransition();
+		return rest;
+
+	}
+
+	moveTo( x: number, y: number, z: number, enableTransition: boolean = false ): Promise<void> {
+
+		const rest = super.moveTo( x, y, z, enableTransition );
+		this._followDollyInUserTransition();
+		return rest;
+
+	}
+
+	setLookAt(
+		positionX: number, positionY: number, positionZ: number,
+		targetX: number, targetY: number, targetZ: number,
+		enableTransition: boolean = false,
+	): Promise<void> {
+
+		const rest = super.setLookAt( positionX, positionY, positionZ, targetX, targetY, targetZ, enableTransition );
+		this._followDollyInUserTransition();
+		return rest;
+
+	}
+
+	lerp(
+		stateA: CameraControlsLerpState,
+		stateB: CameraControlsLerpState,
+		t: number,
+		enableTransition: boolean = false,
+	): Promise<void> {
+
+		const rest = super.lerp( stateA, stateB, t, enableTransition );
+		this._followDollyInUserTransition();
+		return rest;
+
+	}
+
+	/**
+	 * Inside a `userTransition`, a target that moves while the distance (the zoom, for
+	 * orthographic) is changing eases on the dolly's clock, as the wheel's dolly-to-cursor
+	 * does. This keeps a userland zoom about a point in lockstep — for example `moveTo` plus
+	 * `dollyTo` — even with `controlSmoothTime.truck = 0`.
+	 *
+	 * The check reads whether the distance is actually changing, not only the dolly mark. So a
+	 * `setLookAt` that only turns the camera leaves the target on the truck's clock.
+	 */
+	protected _followDollyInUserTransition(): void {
+
+		if ( this._userTransitions === 0 ) return;
+
+		const zooming = isOrthographicCamera( this._camera ) ?
+			this._isUserControllingZoom && ! approxEquals( this._zoom, this._zoomEnd ) :
+			this._isUserControllingDolly && ! approxEquals( this._spherical.radius, this._sphericalEnd.radius );
+		this._targetFollowsDolly = this._isUserControllingTruck && zooming;
+
+	}
+
+	protected _endUserTransition(): void {
+
+		super._endUserTransition();
+		this._targetFollowsDolly = false;
 
 	}
 
