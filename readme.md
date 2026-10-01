@@ -548,10 +548,17 @@ Every method that you call while a transition runs marks its axes as user-contro
 In `MapControls`, a target that moves while the distance changes eases on the dolly's clock, as the wheel's dolly-to-cursor does. A zoom about a point, made from `moveTo` and `dollyTo`, then stays in step even with `controlSmoothTime.truck = 0`.
 
 ```js
+// Moves at the same time.
 await cameraControls.userTransition( () => Promise.all( [
 	cameraControls.moveTo( x, y, z, true ),
 	cameraControls.dollyTo( distance, true ),
 ] ) );
+
+// Moves one after another: an async callback can await between them.
+await cameraControls.userTransition( async () => {
+	await cameraControls.moveTo( x, y, z, true );
+	await cameraControls.dollyTo( distance, true );
+} );
 ```
 
 | Name         | Type                     | Description |

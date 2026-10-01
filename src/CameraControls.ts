@@ -2198,10 +2198,17 @@ export class CameraControls extends EventDispatcher {
 	 * called from elsewhere during that time is marked the same way.
 	 *
 	 * ```js
+	 * // Moves at the same time.
 	 * await cameraControls.userTransition( () => Promise.all( [
 	 * 	cameraControls.moveTo( x, y, z, true ),
 	 * 	cameraControls.dollyTo( distance, true ),
 	 * ] ) );
+	 *
+	 * // Moves one after another: an async callback can await between them.
+	 * await cameraControls.userTransition( async () => {
+	 * 	await cameraControls.moveTo( x, y, z, true );
+	 * 	await cameraControls.dollyTo( distance, true );
+	 * } );
 	 * ```
 	 * @param transition Issues the moves. Its promise must settle only after the moves do,
 	 * because the user-control marks are cleared when it settles.
@@ -2220,22 +2227,17 @@ export class CameraControls extends EventDispatcher {
 		} finally {
 
 			this._userTransitions --;
-			if ( this._userTransitions === 0 ) this._endUserTransition();
+			if ( this._userTransitions === 0 ) {
+
+				this._isUserControllingRotate = false;
+				this._isUserControllingDolly = false;
+				this._isUserControllingTruck = false;
+				this._isUserControllingOffset = false;
+				this._isUserControllingZoom = false;
+
+			}
 
 		}
-
-	}
-
-	/**
-	 * Clears every user-control mark once the last `userTransition` has settled.
-	 */
-	protected _endUserTransition(): void {
-
-		this._isUserControllingRotate = false;
-		this._isUserControllingDolly = false;
-		this._isUserControllingTruck = false;
-		this._isUserControllingOffset = false;
-		this._isUserControllingZoom = false;
 
 	}
 
