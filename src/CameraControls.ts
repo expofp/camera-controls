@@ -425,6 +425,12 @@ export class CameraControls extends EventDispatcher {
 	// How many `userTransition`s are running. A count rather than a flag, so overlapping
 	// transitions do not end each other.
 	protected _userTransitions = 0;
+	// The distance (and, for orthographic, the zoom) a running `userTransition` last moved toward,
+	// or `null` when none did. The user-control flags cannot tell a transition's dolly from one the
+	// controls' own gestures started, such as a pinch during a twist, because both set the same
+	// flag. This can: a gesture that moves the distance moves its end away from the value recorded.
+	protected _userTransitionRadiusEnd: number | null = null;
+	protected _userTransitionZoomEnd: number | null = null;
 	protected _lastDollyDirection: DOLLY_DIRECTION = DOLLY_DIRECTION.NONE;
 
 	// velocities for smoothDamp
@@ -1649,7 +1655,10 @@ export class CameraControls extends EventDispatcher {
 		this._isUserControllingDolly = this._userTransitions > 0;
 		this._lastDollyDirection = DOLLY_DIRECTION.NONE;
 		this._changedDolly = 0;
-		return this._dollyToNoClamp( clamp( distance, this.minDistance, this.maxDistance ), enableTransition );
+		const radiusEnd = this._sphericalEnd.radius;
+		const rest = this._dollyToNoClamp( clamp( distance, this.minDistance, this.maxDistance ), enableTransition );
+		this._recordUserTransitionRadius( radiusEnd );
+		return rest;
 
 	}
 
@@ -1736,7 +1745,9 @@ export class CameraControls extends EventDispatcher {
 
 		this._isUserControllingZoom = this._userTransitions > 0;
 
+		const zoomEnd = this._zoomEnd;
 		this._zoomEnd = clamp( zoom, this.minZoom, this.maxZoom );
+		if ( this._userTransitions > 0 && ! approxEquals( this._zoomEnd, zoomEnd ) ) this._userTransitionZoomEnd = this._zoomEnd;
 		this._needsUpdate = true;
 
 		if ( ! enableTransition ) {
@@ -2060,6 +2071,7 @@ export class CameraControls extends EventDispatcher {
 		this._isUserControllingTruck = isUserTransition;
 		this._lastDollyDirection = DOLLY_DIRECTION.NONE;
 		this._changedDolly = 0;
+		const radiusEnd = this._sphericalEnd.radius;
 
 		const target = _v3B.set( targetX, targetY, targetZ );
 		const position = _v3A.set( positionX, positionY, positionZ );
@@ -2085,6 +2097,7 @@ export class CameraControls extends EventDispatcher {
 		}
 
 		this._sphericalEnd.setFromVector3( position.applyQuaternion( this._yAxisUpSpace ) );
+		this._recordUserTransitionRadius( radiusEnd );
 
 		this._needsUpdate = true;
 
@@ -2127,6 +2140,7 @@ export class CameraControls extends EventDispatcher {
 		this._isUserControllingTruck = isUserTransition;
 		this._lastDollyDirection = DOLLY_DIRECTION.NONE;
 		this._changedDolly = 0;
+		const radiusEnd = this._sphericalEnd.radius;
 
 		const targetA = _v3A.set( ...stateA.target );
 		if ( 'spherical' in stateA ) {
@@ -2163,6 +2177,7 @@ export class CameraControls extends EventDispatcher {
 			_sphericalA.phi    + deltaPhi    * t,
 			_sphericalA.theta  + deltaTheta  * t,
 		);
+		this._recordUserTransitionRadius( radiusEnd );
 
 		this._needsUpdate = true;
 
@@ -2195,7 +2210,9 @@ export class CameraControls extends EventDispatcher {
 	 *
 	 * Every method called while a transition runs marks its axes as user-controlled. That includes
 	 * a method called after an `await`, so a transition may be a sequence of moves. A method
-	 * called from elsewhere during that time is marked the same way.
+	 * called from elsewhere during that time is marked the same way. The marks stay after the
+	 * transition, as a wheel tick's do, until the next programmatic move of each axis clears
+	 * them. They are never reset in bulk, because the controls' own gestures share them.
 	 *
 	 * ```js
 	 * // Moves at the same time.
@@ -2211,7 +2228,7 @@ export class CameraControls extends EventDispatcher {
 	 * } );
 	 * ```
 	 * @param transition Issues the moves. Its promise must settle only after the moves do,
-	 * because the user-control marks are cleared when it settles.
+	 * because the transition ends when it settles.
 	 * @returns What `transition` returns.
 	 * @category Methods
 	 */
@@ -2229,15 +2246,25 @@ export class CameraControls extends EventDispatcher {
 			this._userTransitions --;
 			if ( this._userTransitions === 0 ) {
 
-				this._isUserControllingRotate = false;
-				this._isUserControllingDolly = false;
-				this._isUserControllingTruck = false;
-				this._isUserControllingOffset = false;
-				this._isUserControllingZoom = false;
+				this._userTransitionRadiusEnd = null;
+				this._userTransitionZoomEnd = null;
 
 			}
 
 		}
+
+	}
+
+	/**
+	 * Inside a `userTransition`, records the distance a method moved toward, when it changed it.
+	 * A method that leaves the distance alone, such as a `setLookAt` that only turns the camera,
+	 * records nothing.
+	 * @param radiusEnd The end distance before the method ran.
+	 */
+	protected _recordUserTransitionRadius( radiusEnd: number ): void {
+
+		if ( this._userTransitions === 0 || approxEquals( this._sphericalEnd.radius, radiusEnd ) ) return;
+		this._userTransitionRadiusEnd = this._sphericalEnd.radius;
 
 	}
 
