@@ -543,9 +543,9 @@ Runs camera moves as though the user made them by hand. The moves ease by `contr
 
 Use it for gestures that you recognize outside the controls, for example a double tap or a two-finger twist from a gesture library. Those gestures can move the camera only through the methods above, and each method otherwise marks its move as programmatic.
 
-Every method that you call while a transition runs marks its axes as user-controlled. This includes a method that you call after an `await`, so one transition can hold a sequence of moves. A method called from other code during the transition is marked the same way. The marks are cleared when the last running transition settles.
+Every method that you call while a transition runs marks its axes as user-controlled. This includes a method that you call after an `await`, so one transition can hold a sequence of moves. A method called from other code during the transition is marked the same way. The marks stay after the transition, as they do after a wheel tick, until the next programmatic move of each axis clears them.
 
-In `MapControls`, a target that moves while the distance changes eases on the dolly's clock, as the wheel's dolly-to-cursor does. A zoom about a point, made from `moveTo` and `dollyTo`, then stays in step even with `controlSmoothTime.truck = 0`.
+In `MapControls`, a target that moves while the transition changes the distance eases on the dolly's clock, as the wheel's dolly-to-cursor does. A zoom about a point, made from `moveTo` and `dollyTo`, then stays in step even with `controlSmoothTime.truck = 0`. A pinch that runs during a transition keeps its own clocks.
 
 ```js
 // Moves at the same time.
