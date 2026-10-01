@@ -416,12 +416,15 @@ export class CameraControls extends EventDispatcher {
 
 	// Use draggingSmoothTime over smoothTime while true.
 	// set automatically true on user-dragging start.
-	// set automatically false on programmable methods call.
+	// set automatically false on programmable methods call — or true, inside `userTransition`.
 	protected _isUserControllingRotate: boolean = false;
 	protected _isUserControllingDolly: boolean = false;
 	protected _isUserControllingTruck: boolean = false;
 	protected _isUserControllingOffset: boolean = false;
 	protected _isUserControllingZoom: boolean = false;
+	// How many `userTransition`s are running. A count rather than a flag, so overlapping
+	// transitions do not end each other.
+	protected _userTransitions = 0;
 	protected _lastDollyDirection: DOLLY_DIRECTION = DOLLY_DIRECTION.NONE;
 
 	// velocities for smoothDamp
@@ -1598,7 +1601,7 @@ export class CameraControls extends EventDispatcher {
 	 */
 	rotateTo( azimuthAngle: number, polarAngle: number, enableTransition: boolean = false ): Promise<void> {
 
-		this._isUserControllingRotate = false;
+		this._isUserControllingRotate = this._userTransitions > 0;
 
 		const theta = clamp( azimuthAngle, this.minAzimuthAngle, this.maxAzimuthAngle );
 		const phi   = clamp( polarAngle,   this.minPolarAngle,   this.maxPolarAngle );
@@ -1643,7 +1646,7 @@ export class CameraControls extends EventDispatcher {
 	 */
 	dollyTo( distance: number, enableTransition: boolean = false ): Promise<void> {
 
-		this._isUserControllingDolly = false;
+		this._isUserControllingDolly = this._userTransitions > 0;
 		this._lastDollyDirection = DOLLY_DIRECTION.NONE;
 		this._changedDolly = 0;
 		return this._dollyToNoClamp( clamp( distance, this.minDistance, this.maxDistance ), enableTransition );
@@ -1731,7 +1734,7 @@ export class CameraControls extends EventDispatcher {
 	 */
 	zoomTo( zoom: number, enableTransition: boolean = false ): Promise<void> {
 
-		this._isUserControllingZoom = false;
+		this._isUserControllingZoom = this._userTransitions > 0;
 
 		this._zoomEnd = clamp( zoom, this.minZoom, this.maxZoom );
 		this._needsUpdate = true;
@@ -1826,7 +1829,7 @@ export class CameraControls extends EventDispatcher {
 	 */
 	moveTo( x: number, y: number, z: number, enableTransition: boolean = false ): Promise<void> {
 
-		this._isUserControllingTruck = false;
+		this._isUserControllingTruck = this._userTransitions > 0;
 
 		const offset = _v3A.set( x, y, z ).sub( this._targetEnd );
 		this._encloseToBoundary( this._targetEnd, offset, this.boundaryFriction );
@@ -2051,9 +2054,10 @@ export class CameraControls extends EventDispatcher {
 		enableTransition: boolean = false,
 	): Promise<void> {
 
-		this._isUserControllingRotate = false;
-		this._isUserControllingDolly = false;
-		this._isUserControllingTruck = false;
+		const isUserTransition = this._userTransitions > 0;
+		this._isUserControllingRotate = isUserTransition;
+		this._isUserControllingDolly = isUserTransition;
+		this._isUserControllingTruck = isUserTransition;
 		this._lastDollyDirection = DOLLY_DIRECTION.NONE;
 		this._changedDolly = 0;
 
@@ -2117,9 +2121,10 @@ export class CameraControls extends EventDispatcher {
 		enableTransition: boolean = false,
 	): Promise<void> {
 
-		this._isUserControllingRotate = false;
-		this._isUserControllingDolly = false;
-		this._isUserControllingTruck = false;
+		const isUserTransition = this._userTransitions > 0;
+		this._isUserControllingRotate = isUserTransition;
+		this._isUserControllingDolly = isUserTransition;
+		this._isUserControllingTruck = isUserTransition;
 		this._lastDollyDirection = DOLLY_DIRECTION.NONE;
 		this._changedDolly = 0;
 
@@ -2176,6 +2181,63 @@ export class CameraControls extends EventDispatcher {
 			approxEquals( this._spherical.phi, this._sphericalEnd.phi, this.restThreshold ) &&
 			approxEquals( this._spherical.radius, this._sphericalEnd.radius, this.restThreshold );
 		return this._createOnRestPromise( resolveImmediately );
+
+	}
+
+
+	/**
+	 * Runs camera moves as though the user made them by hand. They ease by `controlSmoothTime`
+	 * rather than `smoothTime`, and a `control` event reports them, as it does a drag.
+	 *
+	 * Use it for gestures recognized outside the controls — a double tap, or a two-finger twist
+	 * from a gesture library — which can move the camera only through the public methods. Those
+	 * methods otherwise mark each move as a programmatic one.
+	 *
+	 * Every method called while a transition runs marks its axes as user-controlled. That includes
+	 * a method called after an `await`, so a transition may be a sequence of moves. A method
+	 * called from elsewhere during that time is marked the same way.
+	 *
+	 * ```js
+	 * // Moves at the same time.
+	 * await cameraControls.userTransition( () => Promise.all( [
+	 * 	cameraControls.moveTo( x, y, z, true ),
+	 * 	cameraControls.dollyTo( distance, true ),
+	 * ] ) );
+	 *
+	 * // Moves one after another: an async callback can await between them.
+	 * await cameraControls.userTransition( async () => {
+	 * 	await cameraControls.moveTo( x, y, z, true );
+	 * 	await cameraControls.dollyTo( distance, true );
+	 * } );
+	 * ```
+	 * @param transition Issues the moves. Its promise must settle only after the moves do,
+	 * because the user-control marks are cleared when it settles.
+	 * @returns What `transition` returns.
+	 * @category Methods
+	 */
+	async userTransition<T>( transition: () => Promise<T> ): Promise<T> {
+
+		this._userTransitions ++;
+		this.dispatchEvent( { type: 'control' } );
+
+		try {
+
+			return await transition();
+
+		} finally {
+
+			this._userTransitions --;
+			if ( this._userTransitions === 0 ) {
+
+				this._isUserControllingRotate = false;
+				this._isUserControllingDolly = false;
+				this._isUserControllingTruck = false;
+				this._isUserControllingOffset = false;
+				this._isUserControllingZoom = false;
+
+			}
+
+		}
 
 	}
 
@@ -2277,7 +2339,7 @@ export class CameraControls extends EventDispatcher {
 	 */
 	setFocalOffset( x: number, y: number, z: number, enableTransition: boolean = false ): Promise<void> {
 
-		this._isUserControllingOffset = false;
+		this._isUserControllingOffset = this._userTransitions > 0;
 
 		this._focalOffsetEnd.set( x, y, z );
 		this._needsUpdate = true;
